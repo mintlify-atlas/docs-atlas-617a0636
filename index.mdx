@@ -1,97 +1,70 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "LLVM Compiler Infrastructure"
+description: "A collection of modular, reusable compiler and toolchain technologies for building high-performance compilers, optimizers, and code generation backends."
 ---
 
-## Setting up
+LLVM is the industry-standard compiler infrastructure used by Apple, Google, AMD, ARM, and many others. It provides a powerful intermediate representation (IR), a rich suite of optimization passes, and target-independent code generation for architectures including x86, ARM, RISC-V, AMDGPU, and more.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="rocket" href="/introduction">
+    Learn what LLVM is and how its components fit together.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Building LLVM" icon="hammer" href="/building-llvm">
+    Clone the repository, configure with CMake, and build your first LLVM toolchain.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="LLVM IR Reference" icon="code" href="/reference/langref">
+    Complete reference for the LLVM intermediate representation language.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Writing a Pass" icon="layer-group" href="/guides/writing-a-pass">
+    Extend LLVM with custom analysis and transformation passes.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What's in the LLVM project
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Clang" icon="c" href="/subprojects/clang">
+    A C, C++, and Objective-C compiler frontend with best-in-class diagnostics.
+  </Card>
+  <Card title="LLD" icon="link" href="/subprojects/lld">
+    A fast, drop-in replacement linker that links large programs in seconds.
+  </Card>
+  <Card title="LLDB" icon="bug" href="/subprojects/lldb">
+    A modern, extensible debugger built on LLVM and Clang libraries.
+  </Card>
+  <Card title="MLIR" icon="diagram-project" href="/subprojects/mlir">
+    A flexible IR framework for building domain-specific compilers and toolchains.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Core infrastructure
 
-## Need inspiration?
+<Steps>
+  <Step title="Clone and build">
+    Get the LLVM source and build a full toolchain with CMake and Ninja in a single workflow.
+  </Step>
+  <Step title="Understand the IR">
+    Learn LLVM's Static Single Assignment (SSA) intermediate representation — the foundation of all LLVM-based compilers.
+  </Step>
+  <Step title="Write your first pass">
+    Use the new pass manager to write an analysis or transformation pass that runs over LLVM IR.
+  </Step>
+  <Step title="Target a new architecture">
+    Implement a TableGen-driven backend to generate machine code for a custom or existing hardware target.
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="brain" href="/concepts/ir-overview">
+    Understand the IR, pass manager, code generator, and TableGen.
+  </Card>
+  <Card title="Developer Guides" icon="book-open" href="/guides/writing-a-pass">
+    Practical guides for extending LLVM with passes, backends, and more.
+  </Card>
+  <Card title="Tool Reference" icon="terminal" href="/reference/tools/opt">
+    Command-line tools: opt, llc, lli, clang, and the binary inspection suite.
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/contributing/how-to-contribute">
+    Learn the development workflow, coding standards, and how to submit changes.
+  </Card>
+</CardGroup>

@@ -1,0 +1,195 @@
+---
+title: "LLVM Bitcode Format"
+description: "Binary encoding of LLVM IR: bitstream container format, wrapper structures, block/record layout, and use in LTO."
+---
+
+LLVM bitcode is a compact binary encoding of LLVM IR. It is one of the three equivalent forms of LLVM IR — alongside the in-memory representation and the human-readable text assembly. Bitcode is suitable for fast loading by a JIT compiler and is the primary format used for Link-Time Optimization (LTO).
+
+## Overview
+
+What is commonly called the LLVM bitcode file format is actually two layered things:
+
+1. **A bitstream container format** — an abstract binary encoding of structured data, similar to XML in concept but binary and self-describing via abbreviations.
+2. **An encoding of LLVM IR** within that container format.
+
+LLVM IR files may optionally be embedded in a wrapper structure or stored inside a native object file section.
+
+## Converting between formats
+
+<CodeGroup>
+
+```bash assemble to bitcode
+# Assemble text IR (.ll) to bitcode (.bc)
+llvm-as input.ll -o output.bc
+```
+
+```bash disassemble bitcode
+# Disassemble bitcode (.bc) to text IR (.ll)
+llvm-dis input.bc -o output.ll
+```
+
+```bash inspect bitcode
+# Dump bitcode structure symbolically
+llvm-bcanalyzer --dump input.bc
+```
+
+</CodeGroup>
+
+<Tip>
+Use `llvm-bcanalyzer` to understand the block and record layout of any bitcode file. It is invaluable when debugging serialization issues or verifying what a compiler actually emits.
+</Tip>
+
+## Bitstream container format
+
+The bitstream format is literally a stream of bits read from least-significant bit to most-significant bit of each byte. It is built from the following primitives.
+
+### Primitive encodings
+
+<AccordionGroup>
+  <Accordion title="Fixed-width integers">
+    Fixed-width integer values have their low bits emitted directly. For example, a 3-bit integer encodes 1 as `001`. These are used when there is a well-known number of options for a field — boolean flags are typically encoded as 1-bit integers.
+  </Accordion>
+  <Accordion title="Variable-width integers (VBR)">
+    Variable-width integers encode values of arbitrary size, optimized for small values. In a 4-bit VBR field, any 3-bit value (0–7) is encoded directly with the high bit set to zero. Larger values are emitted in N-1 bit chunks, with all but the last chunk having the high bit set as a continuation flag.
+
+    For example, the value 30 (`0x1E`) encoded as a `vbr4` becomes `0b00111110`: the first 4 bits `0110` indicate value 6 (with continuation), the next 4 bits `0011` indicate value 24 (no continuation). The sum 6 + 24 = 30.
+  </Accordion>
+  <Accordion title="6-bit characters">
+    A compact encoding for common identifier characters:
+
+    | Range | Values |
+    |-------|--------|
+    | `a`–`z` | 0–25 |
+    | `A`–`Z` | 26–51 |
+    | `0`–`9` | 52–61 |
+    | `.` | 62 |
+    | `_` | 63 |
+
+    Only characters in this set can be encoded this way.
+  </Accordion>
+</AccordionGroup>
+
+### Magic number
+
+The first four bytes of a bitstream identify its content type. LLVM IR bitcode files use:
+
+```
+'B' 'C' 0x0 0xC 0xE 0xD
+```
+
+Generic tools may read the magic number to identify the stream type but must not reject unknown magic numbers.
+
+### Blocks
+
+Blocks define nested regions of the stream and are identified by a numeric block ID. Block IDs 0–7 are reserved for standard blocks; IDs 8 and above are application-specific. LLVM IR uses block ID 12 for function bodies.
+
+Each block maintains:
+- A current abbreviation ID width (starts at 2 for the root block).
+- A set of active abbreviations local to that block.
+
+The reader can skip an entire block in constant time using the block length stored in the `ENTER_SUBBLOCK` record. LLVM's IR reader uses this to lazily load function bodies on demand.
+
+### Built-in abbreviation IDs
+
+| ID | Name | Description |
+|----|------|-------------|
+| 0 | `END_BLOCK` | Marks the end of the current block. Aligned to 32 bits. |
+| 1 | `ENTER_SUBBLOCK` | Starts a new nested block. Carries block ID, new abbrev-width, and block length in 32-bit words. |
+| 2 | `DEFINE_ABBREV` | Defines a new abbreviation for use in the current block. |
+| 3 | `UNABBREV_RECORD` | Encodes a record using VBR6 for the code, operand count, and each operand. General but inefficient. |
+| 4+ | user-defined | Abbreviated record encodings defined by `DEFINE_ABBREV`. |
+
+### Data records
+
+Records consist of a record code and up to 64-bit integer operands. The interpretation is application-specific and varies by block type. For example, the `MODULE_CODE_TRIPLE` record in the module block carries the ASCII codes of the target triple string.
+
+### Abbreviations
+
+Abbreviations are the key compression mechanism. A `DEFINE_ABBREV` record specifies a dense encoding for a class of records; subsequent records matching that class are encoded compactly using the abbreviation ID. Abbreviations are file-specific and self-described — the reader learns them as it parses.
+
+For example, LLVM IR files typically define an abbreviation for binary operators. If a module contains no binary operators, that abbreviation is simply not emitted.
+
+## Wrapper formats
+
+### Bitcode wrapper format
+
+LLVM IR bitcode files may optionally be wrapped in a simple five-field header:
+
+```
+[Magic_32, Version_32, Offset_32, Size_32, CPUType_32]
+```
+
+All fields are 32-bit, little-endian. The magic number is always `0x0B17C0DE`, and the current version is `0`. `Offset` and `Size` give the byte range of the embedded bitstream within the file. `CPUType` is a target-specific value encoding the CPU.
+
+This wrapper allows additional data to be stored alongside the bitcode without requiring the reader to understand it.
+
+### Native object file embedding
+
+Bitcode can also be embedded in a native object file (ELF, COFF, or Mach-O):
+
+| Format | Section name | Notes |
+|--------|-------------|-------|
+| Mach-O | `__LLVM,__bitcode` | Used by Apple tools |
+| ELF/COFF | `.llvmbc` | Predates FatLTO; may not be LTO-ready |
+| ELF | `.llvm.lto` | FatLTO section; contains pre-link LTO pipeline bitcode |
+
+<Warning>
+The `.llvmbc` section predates FatLTO support. Bitcode stored there (for example, via `-fembed-bitcode`) may not always be suitable for LTO. Use `.llvm.lto` when FatLTO is the goal.
+</Warning>
+
+## Link-Time Optimization (LTO)
+
+Bitcode is the foundation of LLVM's LTO support. Because the full IR is preserved in the bitcode, the linker-time LTO pass can perform whole-program optimizations such as inlining across translation unit boundaries, dead code elimination, and global value numbering.
+
+### Full LTO
+
+In full LTO, all participating translation units are compiled to bitcode, loaded together at link time, merged into a single module, optimized, and then lowered to native code.
+
+```bash
+# Compile to bitcode
+clang -flto -c file1.c -o file1.o
+clang -flto -c file2.c -o file2.o
+
+# Link with LTO (the linker invokes the LTO plugin)
+clang -flto file1.o file2.o -o program
+```
+
+### Thin LTO
+
+Thin LTO improves scalability by processing each module largely in parallel. Instead of merging all IR into one giant module, Thin LTO uses a lightweight summary index to guide cross-module inlining and other optimizations, while keeping the bulk of the optimization work per-module.
+
+```bash
+# Compile with ThinLTO
+clang -flto=thin -c file1.c -o file1.o
+clang -flto=thin -c file2.c -o file2.o
+
+# Link
+clang -flto=thin file1.o file2.o -o program
+```
+
+### Fat LTO
+
+Fat LTO embeds LTO-ready bitcode alongside native code in the same object file. When linking with an LTO-aware linker, it uses the embedded bitcode. When linking without LTO support, it falls back to the native code. The bitcode lives in the `.llvm.lto` section of ELF objects.
+
+```bash
+clang -ffat-lto-objects -flto -c file.c -o file.o
+```
+
+<Info>
+The `BLOCKINFO` block in a bitstream is a metadata block that provides names for blocks and records. `llvm-bcanalyzer` uses this information to produce human-readable symbolic dumps of bitcode files.
+</Info>
+
+## LLVM IR encoding structure
+
+LLVM IR is encoded into the bitstream as a hierarchy of typed blocks:
+
+| Block | Content |
+|-------|---------|
+| Module block | Top-level structure: target info, globals, function declarations |
+| Type block | All types used in the module |
+| Constants block | Module-level constants |
+| Function block | Per-function IR: basic blocks and instructions |
+| Value symtab block | Value symbol table entries |
+| Metadata block | Debug info, `!`-prefixed metadata nodes |
+
+The abbreviations used within each block are fully self-described in the file. The reader builds its abbreviation table as it encounters `DEFINE_ABBREV` records; it never assumes a fixed abbreviation layout.

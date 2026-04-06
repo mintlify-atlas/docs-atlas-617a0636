@@ -1,0 +1,231 @@
+---
+title: "Debugging LLVM"
+description: "Techniques for debugging miscompilations and crashes in LLVM, including the -debug flag, LLVM_DEBUG macro, print-before/print-after, OptBisect, and using gdb/lldb."
+---
+
+This guide covers strategies for finding the source of miscompilations, crashes, and other incorrect behavior in LLVM. Most techniques assume you are starting from a compile command that produces wrong output and want to identify which pass or transformation is responsible.
+
+## Extract and rerun the compile command
+
+The first step is to isolate the exact Clang command that produces the buggy output.
+
+<Tabs>
+  <Tab title="Ninja">
+    ```bash
+    ninja -t commands myprogram | grep path/to/file.cpp
+    ```
+  </Tab>
+  <Tab title="Bazel">
+    ```bash
+    bazel aquery --output=commands 'deps(//myprogram)' | grep path/to/file.cpp
+    ```
+    Build commands must generally be run from a subdirectory of the source directory named `bazel-$PROJECTNAME`. Bazel may make the `-o` and `-MF` targets read-only, so you may need to remove those flags.
+  </Tab>
+  <Tab title="Bear (any build system)">
+    ```bash
+    bear -- make
+    # then inspect compile_commands.json
+    ```
+    [Bear](https://github.com/rizsotto/Bear) intercepts compiler invocations and writes a `compile_commands.json` that contains the exact flags used for each file.
+  </Tab>
+</Tabs>
+
+<Note>
+LLVM flags must be prefixed with `-mllvm` when passed to the Clang driver. For example: `-mllvm -print-after-all`.
+</Note>
+
+## Building a debug build of LLVM
+
+Most advanced debugging techniques require a debug build. Create one in a separate build tree:
+
+```bash
+cmake -S llvm -B build-debug -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_ENABLE_ASSERTIONS=ON
+ninja -C build-debug opt clang
+```
+
+A debug build is substantially slower to run, so keep a separate release build for normal use.
+
+## Identifying the pass that introduces a bug
+
+### print-after-all
+
+When a miscompilation is introduced by a pass, use `-print-after-all` to dump the IR after every pass. Pipe stderr into `less` and search for pass boundaries:
+
+```bash
+clang -mllvm -print-after-all -O2 source.c -o /dev/null 2>&1 | less
+```
+
+Inside `less`, search for `Dump After` and step through passes with `n` / `N`. If you know the function name, filter the output:
+
+```bash
+clang -mllvm -print-after-all \
+      -mllvm -filter-print-funcs=my_function \
+      -O2 source.c -o /dev/null 2>&1 | less
+```
+
+The companion flag `-print-before-all` dumps IR before each pass, useful for diffing a before/after pair.
+
+### -debug flag
+
+Passing `-debug` to `opt` (or `-mllvm -debug` through Clang) enables verbose diagnostic output from passes that use the `LLVM_DEBUG` macro:
+
+```bash
+opt -debug -passes=instcombine input.ll -o /dev/null
+```
+
+To restrict output to a specific pass, use `-debug-only`:
+
+```bash
+opt -debug-only=instcombine -passes=instcombine input.ll -o /dev/null
+```
+
+### LLVM_DEBUG macro
+
+Inside a pass, wrap diagnostic output in `LLVM_DEBUG` so it is emitted only when `-debug` is active:
+
+```cpp
+#include "llvm/Support/Debug.h"
+#define DEBUG_TYPE "my-pass"
+
+PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM) {
+  LLVM_DEBUG(dbgs() << "Running MyPass on " << F.getName() << "\n");
+  // ...
+  LLVM_DEBUG({
+    dbgs() << "IR after transformation:\n";
+    F.dump();
+  });
+  return PreservedAnalyses::none();
+}
+```
+
+The `DEBUG_TYPE` string is the identifier used with `-debug-only=my-pass`.
+
+## Checking IR validity: -verify-each
+
+Appending `-verify-each` causes the IR verifier to run after every pass in the pipeline. This quickly surfaces passes that leave the IR in an invalid state:
+
+```bash
+opt -verify-each -passes="default<O2>" input.ll -o /dev/null
+```
+
+When the verifier reports an error, the pass that ran just before the error message is the likely culprit.
+
+## Tracing instruction origins: -print-inst-addrs
+
+To find which code path in LLVM created a specific instruction, use `-print-inst-addrs` together with `-print-after-all`. Each printed instruction is annotated with the memory address of its `Instruction` object:
+
+```bash
+clang -mllvm -print-inst-addrs -mllvm -print-after-all -O2 source.c 2>&1 | less
+```
+
+Record the run under [rr](https://rr-project.org) for deterministic replay:
+
+```bash
+rr record clang -mllvm -print-inst-addrs -mllvm -print-after-all ...
+rr replay
+```
+
+In the replay session, break on instruction construction using the address:
+
+```
+(gdb) b Instruction::Instruction if this == 0x12345678
+```
+
+The backend has analogous flags: `-print-sdnode-addrs` for `SDNode` addresses and `-print-mi-addrs` for `MachineInstr` addresses.
+
+## Identifying source locations: -print-inst-debug-locs
+
+To correlate an LLVM instruction with the original source line (requires debug info):
+
+```bash
+clang -g -mllvm -print-inst-debug-locs -mllvm -print-after-all -O2 source.c 2>&1
+```
+
+Each instruction in the dump is annotated with its source file and line number.
+
+## OptBisect: bisecting the optimization pipeline
+
+`OptBisect` lets you binary-search through the optimization passes to find the exact pass and invocation that introduces a bug:
+
+```bash
+opt -opt-bisect-limit=<N> -passes="default<O2>" input.ll -o output.ll
+```
+
+Start with a large limit (all passes enabled) and a limit of 0 (no passes). Bisect the range until you find the smallest limit that shows the bug. The tool prints which passes ran and which were skipped.
+
+## Using a debugger (gdb / lldb)
+
+LLVM ships helper scripts that add pretty-printers for core LLVM types.
+
+<Tabs>
+  <Tab title="LLDB">
+    ```
+    (lldb) command script import /path/to/llvm/utils/lldbDataFormatters.py
+    ```
+    Add to `~/.lldbinit` for automatic loading.
+  </Tab>
+  <Tab title="GDB">
+    ```
+    (gdb) source /path/to/llvm/utils/gdb-scripts/prettyprinters.py
+    ```
+    Add to `~/.gdbinit` for automatic loading. Also consider enabling `print pretty` to improve readability of nested structures.
+  </Tab>
+</Tabs>
+
+With pretty-printers loaded, types like `llvm::Value`, `llvm::Type`, and `llvm::SmallVector` display in a readable format rather than raw struct dumps.
+
+## Sanitizers: finding bugs in LLVM itself
+
+Build LLVM with sanitizers to catch memory errors, undefined behavior, and data races:
+
+<CodeGroup>
+
+```bash AddressSanitizer
+cmake -S llvm -B build-asan -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_USE_SANITIZER=Address
+ninja -C build-asan opt
+```
+
+```bash UBSanitizer
+cmake -S llvm -B build-ubsan -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_USE_SANITIZER=Undefined
+ninja -C build-ubsan opt
+```
+
+```bash ThreadSanitizer
+cmake -S llvm -B build-tsan -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_USE_SANITIZER=Thread
+ninja -C build-tsan opt
+```
+
+</CodeGroup>
+
+Run your failing test case with the sanitizer-instrumented binary. AddressSanitizer (ASAN) will catch out-of-bounds accesses and use-after-free; UBSan catches signed overflow, null dereferences, and other undefined behavior; TSan finds data races in multithreaded code.
+
+## Bisecting with git bisect
+
+When a regression was introduced in a recent commit range:
+
+```bash
+git bisect start
+git bisect bad HEAD        # current HEAD is bad
+git bisect good v17.0.0   # last known good version
+
+# git checks out a midpoint commit; rebuild and test, then:
+git bisect good   # if the commit is good
+git bisect bad    # if the commit is bad
+# repeat until git identifies the first bad commit
+
+git bisect reset  # restore HEAD when done
+```
+
+For LLVM, rebuild after each bisect step using `ninja -C build opt` (or a minimal target) rather than a full build to minimize bisect time.
+
+<Tip>
+Automate bisect with a script: `git bisect run ./test.sh`. The script should exit 0 for good and non-zero for bad. Make sure the script also rebuilds the relevant binaries.
+</Tip>

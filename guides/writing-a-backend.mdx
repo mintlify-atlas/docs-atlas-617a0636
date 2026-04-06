@@ -1,0 +1,262 @@
+---
+title: "Writing an LLVM Backend"
+description: "A guide to implementing a new LLVM target backend, covering TableGen definitions, target implementation classes, instruction selection, and code emission."
+---
+
+An LLVM backend converts LLVM IR into code for a specific target — either assembly text or binary machine code. LLVM includes a target-independent code generator framework that handles much of the common work; writing a backend means implementing the target-specific portions that plug into that framework.
+
+This guide focuses on the components required for a static compiler backend that emits text assembly, using the SPARC target (a well-known RISC architecture with straightforward calling conventions) as a reference throughout.
+
+<Note>
+For exhaustive detail, read `llvm/docs/WritingAnLLVMBackend.rst` in the LLVM source tree (over 2000 lines). This guide covers the essential structure and steps to get oriented.
+</Note>
+
+## Prerequisites
+
+Before writing a backend, you should be familiar with:
+
+- The [LLVM Language Reference Manual](https://llvm.org/docs/LangRef.html) — the LLVM IR specification.
+- The [LLVM Target-Independent Code Generator](https://llvm.org/docs/CodeGenerator.html) — describes the code generation pipeline: Instruction Selection, Scheduling, SSA Optimization, Register Allocation, Prolog/Epilog Insertion, and Code Emission.
+- [TableGen](https://llvm.org/docs/TableGen/index.html) — the domain-specific language used to describe registers, instructions, and calling conventions.
+
+## What a backend needs
+
+A complete LLVM backend consists of the following components:
+
+<CardGroup cols={2}>
+  <Card title="TargetMachine" icon="cpu">
+    The top-level class representing your target. Owns all other target components and is the entry point for LLVM's code generation pipeline.
+  </Card>
+  <Card title="TargetRegisterInfo" icon="database">
+    Describes the target's register file: physical registers, register classes, aliases, and calling convention register assignments.
+  </Card>
+  <Card title="TargetInstrInfo" icon="list">
+    Describes the target's instruction set: opcodes, operand types, scheduling information, and pattern-matching data for instruction selection.
+  </Card>
+  <Card title="TargetLowering" icon="arrow-down">
+    Controls how LLVM IR operations and types are lowered to SelectionDAG nodes. Handles operations the target does not support natively.
+  </Card>
+  <Card title="SelectionDAG ISel" icon="git-branch">
+    Performs pattern matching to translate SelectionDAG nodes into target instructions. Usually implemented in `XXXISelDAGToDAG.cpp`.
+  </Card>
+  <Card title="AsmPrinter" icon="printer">
+    Converts the final `MachineFunction` representation into GAS-format text assembly output.
+  </Card>
+</CardGroup>
+
+## Directory structure
+
+Create a subdirectory under `llvm/lib/Target/` for your target. If your target is called `Dummy`:
+
+```
+llvm/lib/Target/Dummy/
+├── CMakeLists.txt
+├── DummyTargetMachine.h
+├── DummyTargetMachine.cpp
+├── DummyRegisterInfo.h
+├── DummyRegisterInfo.cpp
+├── DummyRegisterInfo.td
+├── DummyInstrInfo.h
+├── DummyInstrInfo.cpp
+├── DummyInstrInfo.td
+├── DummyISelLowering.h
+├── DummyISelLowering.cpp
+├── DummyISelDAGToDAG.cpp
+├── DummyCallingConv.td
+├── DummySubtarget.h
+├── DummySubtarget.cpp
+└── DummyAsmPrinter.cpp
+```
+
+The `CMakeLists.txt` must set `LLVM_TARGET_DEFINITIONS` and name the library. Copy and adapt from an existing target (e.g., SPARC or RISC-V). The library can be named `LLVMDummy`, or split into `LLVMDummyCodeGen` and `LLVMDummyAsmPrinter` for larger targets.
+
+<Warning>
+These two naming schemes (`LLVMDummy` vs. `LLVMDummyCodeGen` + `LLVMDummyAsmPrinter`) are hardcoded into `llvm-config`. Using any other scheme produces linker errors when linking `llc`.
+</Warning>
+
+## TableGen: describing your target
+
+TableGen (`.td` files) is used to describe registers, instructions, calling conventions, and instruction selection patterns. The `tblgen` tool processes these files and generates C++ that is `#include`d into your target's implementation files.
+
+### Register definitions
+
+In `DummyRegisterInfo.td`, define your physical registers and group them into register classes:
+
+```tablegen
+// Define a single register
+def R0 : Register<"r0">;
+def R1 : Register<"r1">;
+// ... more registers ...
+
+// Define a register class (set of interchangeable registers)
+def GPR : RegisterClass<"Dummy", [i32], 32, (add R0, R1, ...)>;
+```
+
+### Instruction set
+
+In `DummyInstrInfo.td`, define instruction formats and individual instructions. Attach SelectionDAG patterns to enable automatic instruction selection:
+
+```tablegen
+// Instruction that adds two registers
+def ADD : InstDummy<(outs GPR:$dst), (ins GPR:$src1, GPR:$src2),
+                    "add $dst, $src1, $src2",
+                    [(set GPR:$dst, (add GPR:$src1, GPR:$src2))]>;
+```
+
+The pattern `[(set GPR:$dst, (add GPR:$src1, GPR:$src2))]` tells the instruction selector to use this instruction when it sees an `add` node in the SelectionDAG.
+
+### Calling convention
+
+In `DummyCallingConv.td`, describe how arguments and return values are passed:
+
+```tablegen
+def CC_Dummy : CallingConv<[
+  // Pass first 4 i32 args in registers R0–R3
+  CCIfType<[i32], CCAssignToReg<[R0, R1, R2, R3]>>,
+  // Remaining args go on the stack
+  CCIfType<[i32], CCAssignToStack<4, 4>>
+]>;
+```
+
+## Target implementation classes
+
+### TargetMachine
+
+Subclass `LLVMTargetMachine` (not raw `TargetMachine`) to integrate with LLVM's target-independent pipeline:
+
+```cpp
+class DummyTargetMachine : public LLVMTargetMachine {
+public:
+  DummyTargetMachine(const Target &T, const Triple &TT,
+                     StringRef CPU, StringRef FS,
+                     const TargetOptions &Options,
+                     std::optional<Reloc::Model> RM,
+                     std::optional<CodeModel::Model> CM,
+                     CodeGenOptLevel OL, bool JIT);
+
+  const DummySubtarget *getSubtargetImpl(const Function &F) const override;
+  TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
+};
+```
+
+### TargetLowering (ISelLowering)
+
+`DummyISelLowering` controls how LLVM IR types and operations are lowered to SelectionDAG nodes before instruction selection. Override `LowerOperation` to handle operations your target does not support natively:
+
+```cpp
+SDValue DummyTargetLowering::LowerOperation(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  switch (Op.getOpcode()) {
+  default: llvm_unreachable("Unimplemented operation");
+  case ISD::RETURNADDR: return LowerRETURNADDR(Op, DAG);
+  case ISD::GlobalAddress: return LowerGlobalAddress(Op, DAG);
+  }
+}
+```
+
+Use `setOperationAction` in the constructor to declare which operations need lowering:
+
+```cpp
+// Expand ROTL into shifts and ORs
+setOperationAction(ISD::ROTL, MVT::i32, Expand);
+// Use a custom lowering routine
+setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
+```
+
+### Instruction selection (DAGToDAG)
+
+`DummyISelDAGToDAG.cpp` performs the final DAG-to-DAG pattern matching. Most patterns are handled automatically by the TableGen-generated matcher. Override `Select` only for cases that cannot be expressed in TableGen:
+
+```cpp
+void DummyDAGToDAGISel::Select(SDNode *N) {
+  // Let TableGen patterns handle most nodes
+  SelectCode(N);
+}
+```
+
+## Instruction selection: SelectionDAG patterns
+
+Instruction selection converts a SelectionDAG of target-independent operations into a DAG of target-specific `MachineSDNode` nodes. LLVM uses pattern matching driven by TableGen patterns.
+
+The pipeline is:
+
+1. **Legalization** — Converts unsupported types and operations into legal equivalents for your target (`TargetLowering`).
+2. **DAG combining** — Peephole optimizations on the SelectionDAG.
+3. **Instruction selection** — Pattern matching maps SelectionDAG nodes to target instructions.
+4. **Scheduling** — Orders instructions for the target's pipeline.
+
+## Code emission and assembly printing
+
+Subclass `AsmPrinter` to emit GAS-format text assembly:
+
+```cpp
+class DummyAsmPrinter : public AsmPrinter {
+public:
+  explicit DummyAsmPrinter(TargetMachine &TM,
+                            std::unique_ptr<MCStreamer> Streamer)
+      : AsmPrinter(TM, std::move(Streamer)) {}
+
+  StringRef getPassName() const override { return "Dummy Assembly Printer"; }
+  void emitInstruction(const MachineInstr *MI) override;
+};
+```
+
+`emitInstruction` is called for each `MachineInstr`. Use `EmitToStreamer` with an `MCInst` to write the instruction through the MC layer:
+
+```cpp
+void DummyAsmPrinter::emitInstruction(const MachineInstr *MI) {
+  MCInst TmpInst;
+  LowerDummyMachineInstrToMCInst(MI, TmpInst);
+  EmitToStreamer(*OutStreamer, TmpInst);
+}
+```
+
+## Minimal backend implementation steps
+
+<Steps>
+  <Step title="Create the directory and CMakeLists.txt">
+    Create `llvm/lib/Target/Dummy/` and write a `CMakeLists.txt` based on an existing target. Set `LLVM_TARGET_DEFINITIONS` to your main `.td` file.
+  </Step>
+
+  <Step title="Write register definitions (TableGen)">
+    Create `DummyRegisterInfo.td` defining all physical registers and register classes. Implement `DummyRegisterInfo.cpp` as a subclass of `TargetRegisterInfo`.
+  </Step>
+
+  <Step title="Write instruction definitions (TableGen)">
+    Create `DummyInstrInfo.td` with instruction formats, individual instructions, and SelectionDAG patterns. Implement `DummyInstrInfo.cpp` as a subclass of `TargetInstrInfo`.
+  </Step>
+
+  <Step title="Implement TargetMachine">
+    Create `DummyTargetMachine.cpp`. Register the target with LLVM using `RegisterTarget<Triple::dummy>` so it can be selected by triple.
+  </Step>
+
+  <Step title="Implement TargetLowering">
+    Create `DummyISelLowering.cpp`. Use `setOperationAction` and `setLoadExtAction` to declare your target's capabilities and provide `LowerOperation` for custom lowering.
+  </Step>
+
+  <Step title="Implement instruction selection">
+    Create `DummyISelDAGToDAG.cpp`. Most selection is driven by TableGen patterns; add manual `Select` overrides only as needed.
+  </Step>
+
+  <Step title="Implement the assembly printer">
+    Create `DummyAsmPrinter.cpp`. Implement `emitInstruction` to lower each `MachineInstr` to an `MCInst` and emit it.
+  </Step>
+
+  <Step title="Register and enable the target">
+    Add your target to `llvm/CMakeLists.txt`'s `LLVM_ALL_TARGETS` list and enable it in your CMake configuration with `-DLLVM_TARGETS_TO_BUILD=Dummy`.
+  </Step>
+</Steps>
+
+## Optional components
+
+<AccordionGroup>
+  <Accordion title="Subtarget support (-mcpu and -mattr)">
+    Subclass `TargetSubtargetInfo` and use TableGen's `SubtargetFeature` to describe CPU variants and optional features. This enables the `-mcpu=` and `-mattr=` command-line flags to select different instruction set variants at compile time.
+  </Accordion>
+  <Accordion title="JIT support">
+    Implement a subclass of `TargetJITInfo` and a machine code emitter that writes binary code directly into memory. The JIT code path bypasses the text assembly printer entirely.
+  </Accordion>
+  <Accordion title="Disassembler">
+    Implement a disassembler by subclassing `MCDisassembler`. TableGen can generate the decode tables from your instruction definitions using the `DecoderMethod` fields.
+  </Accordion>
+</AccordionGroup>

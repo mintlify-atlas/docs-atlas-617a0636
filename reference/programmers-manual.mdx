@@ -1,0 +1,336 @@
+---
+title: "LLVM Programmer's Manual"
+description: "Key data structures, core IR classes, and common patterns for working with LLVM source and APIs."
+---
+
+This page highlights the most important classes and interfaces in the LLVM codebase for developers writing transformations, analyses, or tools. It assumes familiarity with what LLVM IR looks like and focuses on how to work with it programmatically.
+
+<Note>
+The LLVM source code is the authoritative reference. This manual guides you to the right APIs, but always consult the [doxygen sources](https://llvm.org/doxygen/) when the details matter.
+</Note>
+
+## LLVM-style RTTI: `isa<>`, `cast<>`, `dyn_cast<>`
+
+LLVM does not use C++ `dynamic_cast<>` because it requires a v-table. Instead, it provides its own casting templates defined in `llvm/Support/Casting.h`.
+
+<AccordionGroup>
+  <Accordion title="isa<>">
+    Works like Java's `instanceof`. Returns `true` if a pointer or reference is an instance of the given class. Accepts multiple types:
+
+    ```cpp
+    if (isa<Constant>(V) || isa<Argument>(V) || isa<GlobalValue>(V))
+      return true;
+
+    // Compact multi-type form:
+    if (isa<Constant, Argument, GlobalValue>(V))
+      return true;
+    ```
+  </Accordion>
+
+  <Accordion title="cast<>">
+    A checked downcast. Converts a pointer from a base to a derived type. Triggers an assertion failure if the type is wrong — use only when you know the type is correct:
+
+    ```cpp
+    // We already know V is an Instruction here:
+    return !L->contains(cast<Instruction>(V)->getParent());
+    ```
+  </Accordion>
+
+  <Accordion title="dyn_cast<>">
+    A checking cast. Returns a typed pointer on success, or `nullptr` on failure. Use this in `if` statements instead of pairing `isa<>` with `cast<>`:
+
+    ```cpp
+    if (auto *AI = dyn_cast<AllocaInst>(Val)) {
+      // Val is an AllocaInst — use AI
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Null-safe variants">
+    `isa_and_present<>`, `cast_if_present<>`, and `dyn_cast_if_present<>` behave like their counterparts but accept null pointers (returning `false` or `nullptr` respectively), allowing you to collapse null checks:
+
+    ```cpp
+    // Propagates null through the cast instead of asserting:
+    if (auto *CI = dyn_cast_if_present<CallInst>(MaybeNull)) { ... }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+Do not chain many `dyn_cast<>` checks in an `if/else` ladder. If you find yourself dispatching over many instruction types, use `InstVisitor<>` instead.
+</Warning>
+
+## Key data structures
+
+LLVM defines its own container types in `llvm/ADT/`. These are tuned for LLVM's access patterns and avoid heap allocations in common cases.
+
+<AccordionGroup>
+  <Accordion title="SmallVector<T, N>">
+    A vector that stores the first `N` elements on the stack, spilling to the heap only when it grows beyond `N`. Prefer it over `std::vector` for most uses in LLVM — especially for collections that are usually small:
+
+    ```cpp
+    SmallVector<Value *, 8> Operands;
+    for (auto &Op : I.operands())
+      Operands.push_back(Op.get());
+    ```
+
+    Defined in `llvm/ADT/SmallVector.h`. Pass as `SmallVectorImpl<T>&` when the inline size does not matter to a callee.
+  </Accordion>
+
+  <Accordion title="StringRef">
+    A non-owning reference to a string (a pointer and a length). It can be constructed from a `const char*`, `std::string`, or an explicit pointer+length pair. It supports all common string operations without allocating:
+
+    ```cpp
+    // All three forms are accepted where StringRef is expected:
+    Map.find("foo");
+    Map.find(std::string("bar"));
+    Map.find(StringRef("\0baz", 4));  // embedded null
+    ```
+
+    Never store a `StringRef` unless you know the backing storage outlives it. Always pass by value — it is two pointers wide.
+
+    Defined in `llvm/ADT/StringRef.h`.
+  </Accordion>
+
+  <Accordion title="ArrayRef<T>">
+    A non-owning view over a contiguous array of `T`. Use it in function signatures instead of `const std::vector<T>&` or `T*` + length pairs:
+
+    ```cpp
+    void processOps(ArrayRef<Value *> Ops) {
+      for (Value *V : Ops) { ... }
+    }
+
+    // Callers can pass vectors, SmallVectors, or C arrays:
+    SmallVector<Value *, 4> V = { ... };
+    processOps(V);
+    ```
+
+    Defined in `llvm/ADT/ArrayRef.h`.
+  </Accordion>
+
+  <Accordion title="DenseMap<K, V>">
+    A hash map optimized for LLVM use cases. It stores key-value pairs in a flat open-addressed table, which gives better cache performance than `std::unordered_map`. Keys must be pointer-like or have a `DenseMapInfo<K>` specialization:
+
+    ```cpp
+    DenseMap<Value *, unsigned> UseCount;
+    for (User *U : V->users())
+      UseCount[U]++;
+    ```
+
+    Defined in `llvm/ADT/DenseMap.h`. `DenseSet<T>` provides the set counterpart.
+  </Accordion>
+
+  <Accordion title="StringMap<V>">
+    A hash map keyed by strings. Unlike `DenseMap<StringRef, V>`, it owns a copy of each key so it is safe to use with temporary `StringRef` values:
+
+    ```cpp
+    StringMap<Function *> FuncByName;
+    FuncByName["main"] = M.getFunction("main");
+    ```
+
+    Defined in `llvm/ADT/StringMap.h`.
+  </Accordion>
+
+  <Accordion title="SmallPtrSet<T, N>">
+    A set of pointers that stores the first `N` entries inline. Lookup, insertion, and removal are O(1). Prefer it over `std::set<T*>` for small pointer collections:
+
+    ```cpp
+    SmallPtrSet<BasicBlock *, 16> Visited;
+    if (Visited.insert(BB).second) {
+      // BB was not previously in the set
+    }
+    ```
+
+    Defined in `llvm/ADT/SmallPtrSet.h`.
+  </Accordion>
+
+  <Accordion title="Twine">
+    An efficient lazy string concatenation type. Twines are built from the `+` operator on strings and defer any actual allocation until the result is materialized. Use `Twine` in API signatures when callers need to pass concatenated strings without paying for intermediate heap allocations:
+
+    ```cpp
+    // No heap allocation for the concatenated name:
+    Value *New = CmpInst::Create(..., SO->getName() + ".cmp");
+    ```
+
+    Never store a `Twine` — it holds pointers to stack-allocated temporaries. Defined in `llvm/ADT/Twine.h`.
+  </Accordion>
+</AccordionGroup>
+
+## Core IR classes
+
+LLVM IR is represented in memory as a hierarchy of C++ objects. The main classes are defined under `llvm/IR/`.
+
+### LLVMContext
+
+`LLVMContext` is an opaque object that owns LLVM's core "global" data — type uniquing tables, constants, and metadata kinds. Each thread that uses LLVM needs its own context. Pass it by reference; never copy it:
+
+```cpp
+LLVMContext Ctx;
+std::unique_ptr<Module> M = std::make_unique<Module>("my_module", Ctx);
+```
+
+### Module
+
+`Module` is the top-level container. It holds the list of functions, global variables, and metadata for a translation unit. Defined in `llvm/IR/Module.h`:
+
+```cpp
+// Iterate all functions in a module:
+for (Function &F : M) {
+  errs() << "Function: " << F.getName() << "\n";
+}
+
+// Look up a function by name:
+Function *Main = M.getFunction("main");
+
+// Look up or declare an external function:
+FunctionCallee Printf = M.getOrInsertFunction(
+    "printf",
+    FunctionType::get(IntegerType::getInt32Ty(Ctx), {PointerType::getUnqual(Ctx)}, true));
+```
+
+### Function
+
+`Function` holds arguments and a list of basic blocks. Use it to iterate the CFG:
+
+```cpp
+// Iterate basic blocks:
+for (BasicBlock &BB : F) { ... }
+
+// Iterate arguments:
+for (Argument &Arg : F.args()) {
+  errs() << Arg.getName() << ": " << *Arg.getType() << "\n";
+}
+
+// Get the entry block:
+BasicBlock &Entry = F.getEntryBlock();
+```
+
+### BasicBlock
+
+`BasicBlock` is a sequence of instructions with a single entry and a single terminator. Iterate its instructions:
+
+```cpp
+for (Instruction &I : BB) {
+  errs() << I << "\n";
+}
+
+// Get the terminator:
+Instruction *Term = BB.getTerminator();
+```
+
+### Instruction and Value
+
+Every `Instruction` is a `Value` — it has a type and can be used as an operand by other instructions. The use-def graph connects producers (`Value`) to consumers (`User`):
+
+```cpp
+// Iterate the operands of an instruction:
+for (Use &U : I.operands()) {
+  Value *V = U.get();
+}
+
+// Iterate all users of a value:
+for (User *U : V->users()) {
+  if (auto *UI = dyn_cast<Instruction>(U))
+    errs() << "used in: " << *UI << "\n";
+}
+
+// Get the type of a value:
+Type *T = V->getType();
+```
+
+### IRBuilder
+
+`IRBuilder<>` is the standard way to create new instructions. Set an insertion point and call the creation methods. Defined in `llvm/IR/IRBuilder.h`:
+
+```cpp
+IRBuilder<> Builder(Ctx);
+
+// Insert at the end of an existing basic block:
+Builder.SetInsertPoint(&BB);
+
+// Create instructions:
+Value *Sum  = Builder.CreateAdd(A, B, "sum");
+Value *Cmp  = Builder.CreateICmpSLT(Sum, Zero, "lt");
+Value *Load = Builder.CreateLoad(I32Ty, Ptr, "val");
+Builder.CreateBr(TargetBB);
+
+// Insert before a specific instruction:
+Builder.SetInsertPoint(SomeInst);
+Value *Cast = Builder.CreateSExt(ShortVal, I64Ty, "ext");
+```
+
+## Iterating IR
+
+The standard patterns for walking IR:
+
+```cpp
+// Walk every instruction in a module:
+for (Function &F : M)
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      process(I);
+
+// Walk with a specific instruction type filter:
+for (BasicBlock &BB : F)
+  for (Instruction &I : BB)
+    if (auto *Call = dyn_cast<CallInst>(&I))
+      handleCall(*Call);
+```
+
+## Modifying IR
+
+### Replacing a value
+
+Use `replaceAllUsesWith` to redirect all uses of one value to another:
+
+```cpp
+// Replace all uses of OldVal with NewVal:
+OldVal->replaceAllUsesWith(NewVal);
+
+// Then remove the now-unused instruction:
+OldInst->eraseFromParent();
+```
+
+### Inserting an instruction before another
+
+```cpp
+IRBuilder<> Builder(ExistingInst);
+// IRBuilder inserts before ExistingInst by default when constructed from Instruction*:
+Value *NewVal = Builder.CreateMul(A, B, "product");
+```
+
+### Replacing an instruction in-place
+
+`replaceInstUsesWith` in the instruction combiner pattern updates uses and returns the new value:
+
+```cpp
+// From within a pass:
+Instruction *NewI = BinaryOperator::CreateAdd(X, Y);
+NewI->insertBefore(OldI);
+OldI->replaceAllUsesWith(NewI);
+OldI->eraseFromParent();
+```
+
+<Tip>
+When erasing instructions during iteration, collect them in a `SmallVector` and erase after the loop, or use a reverse post-order iterator that tolerates deletion.
+</Tip>
+
+## String formatting with `formatv`
+
+LLVM provides `formatv` (in `llvm/Support/FormatVariadic.h`) as a type-safe alternative to `printf`. It deduces types at compile time:
+
+```cpp
+// Basic usage — no format specifiers needed:
+std::string S = formatv("{0} ({1:P})", 7, 0.35);  // "7 (35.00%)"
+
+// Out-of-order and repeated references:
+outs() << formatv("{0} {2} {1} {0}", 1, "test", 3);  // "1 3 test 1"
+
+// Alignment:
+S = formatv("{0,-7}", 'a');  // "a      " (left-aligned, width 7)
+S = formatv("{0,=7}", 'a');  // "   a   " (centered)
+
+// Ranges:
+std::vector<int> V = {8, 9, 10};
+S = formatv("{0:$[+]}", make_range(V.begin(), V.end()));  // "8+9+10"
+```

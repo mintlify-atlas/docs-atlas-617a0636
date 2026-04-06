@@ -1,0 +1,190 @@
+---
+title: "MLIR"
+description: "A reusable and extensible compiler infrastructure that introduces multiple levels of intermediate representation, enabling progressive lowering from high-level abstractions to target machine code."
+---
+
+MLIR (Multi-Level Intermediate Representation) is a compiler infrastructure framework within the LLVM project. It provides a flexible IR that can represent computations at many different abstraction levels simultaneously — from high-level dataflow graphs and tensor operations down to target-specific machine instructions. MLIR is the foundation of Flang's FIR dialect, IREE, ONNX-MLIR, and many domain-specific compilers.
+
+## Key concepts
+
+### Operations
+
+An *operation* (`Op`) is the fundamental unit of computation in MLIR. Operations can represent anything: a function definition, an arithmetic add, a matrix multiplication kernel, or a hardware-specific instruction. Every operation has a name, zero or more operands, zero or more results, zero or more regions, and an arbitrary dictionary of attributes.
+
+```mlir
+// A function definition operation containing a region
+func.func @add(%a: i32, %b: i32) -> i32 {
+  %result = arith.addi %a, %b : i32
+  return %result : i32
+}
+```
+
+### Regions and blocks
+
+A *region* is a list of *blocks*. Each block is a sequence of operations ending with a terminator. Regions are owned by operations and define new scopes. This hierarchy enables MLIR to represent structured control flow, closures, and other nested constructs directly in the IR.
+
+```mlir
+// An if-else using the scf (structured control flow) dialect
+%result = scf.if %cond -> (i32) {
+  %v = arith.constant 1 : i32
+  scf.yield %v : i32
+} else {
+  %v = arith.constant 0 : i32
+  scf.yield %v : i32
+}
+```
+
+### Dialects
+
+A *dialect* is a namespace that groups a set of operations, types, and attributes. Dialects are the extension mechanism in MLIR — instead of a fixed instruction set, MLIR programs are composed of operations from multiple dialects coexisting in the same module. This allows progressive lowering: a program starts at a high-level dialect and is progressively converted to lower-level dialects.
+
+## Built-in dialects
+
+MLIR ships a large collection of dialects covering common needs:
+
+| Dialect | Purpose |
+|---------|---------|
+| `func` | Functions, calls, and returns |
+| `arith` | Integer and floating-point arithmetic (add, mul, cmp, etc.) |
+| `memref` | Buffer allocation, loads, stores, and views |
+| `tensor` | Immutable, ranked and unranked tensor values |
+| `linalg` | Named and generic linear algebra operations on tensors/buffers |
+| `scf` | Structured control flow: `if`, `for`, `while`, `parallel` |
+| `cf` | Unstructured control flow: `br`, `cond_br` |
+| `vector` | Fixed-length SIMD vector operations |
+| `affine` | Affine loop nests and memory accesses for polyhedral optimization |
+| `llvm` | Direct mapping to LLVM IR instructions |
+| `gpu` | GPU kernel launch and memory operations |
+| `bufferization` | Tensor-to-buffer conversion |
+
+## The `mlir-opt` tool
+
+`mlir-opt` is the primary command-line tool for running MLIR passes on `.mlir` files. It is the MLIR equivalent of `opt` for LLVM IR.
+
+```bash
+# Run canonicalization
+mlir-opt --canonicalize input.mlir -o output.mlir
+
+# Run CSE followed by inlining
+mlir-opt --cse --inline input.mlir
+
+# Convert from linalg to loops, then to LLVM dialect
+mlir-opt \
+  --convert-linalg-to-loops \
+  --convert-scf-to-cf \
+  --finalize-memref-to-llvm \
+  --convert-func-to-llvm \
+  input.mlir -o lowered.mlir
+
+# Print the IR after every pass (useful for debugging)
+mlir-opt --mlir-print-ir-after-all --canonicalize input.mlir
+
+# List all registered passes
+mlir-opt --help | grep "\-\-"
+```
+
+<Tip>
+  Use `mlir-opt --verify-each` during development to catch IR validity errors immediately after each pass rather than at the end of the pipeline.
+</Tip>
+
+## Writing MLIR
+
+Here is a complete example showing tensor operations lowered through linalg:
+
+```mlir
+// Matrix-vector multiply using linalg.matvec
+func.func @matvec(%A: tensor<4x4xf32>, %x: tensor<4xf32>,
+                  %y: tensor<4xf32>) -> tensor<4xf32> {
+  %result = linalg.matvec
+      ins(%A, %x : tensor<4x4xf32>, tensor<4xf32>)
+      outs(%y : tensor<4xf32>) -> tensor<4xf32>
+  return %result : tensor<4xf32>
+}
+```
+
+## Building a domain-specific compiler with MLIR
+
+<Steps>
+  <Step title="Define your dialect">
+    Declare operations, types, and attributes in TableGen. MLIR generates the C++ boilerplate from the `.td` definitions.
+
+    ```tablegen
+    def MyOp : Op<MyDialect, "my_op", [Pure]> {
+      let arguments = (ins I32:$input);
+      let results = (outs I32:$output);
+    }
+    ```
+  </Step>
+  <Step title="Build the IR">
+    Use the C++ `OpBuilder` API to construct IR programmatically from your frontend AST.
+
+    ```cpp
+    mlir::OpBuilder builder(&context);
+    auto loc = builder.getUnknownLoc();
+    auto result = builder.create<my_dialect::MyOp>(loc, inputValue);
+    ```
+  </Step>
+  <Step title="Write passes">
+    Implement `OperationPass<FuncOp>` subclasses that traverse and transform the IR. Register passes with the pass manager.
+
+    ```cpp
+    struct MyOptimizationPass
+        : public PassWrapper<MyOptimizationPass, OperationPass<func::FuncOp>> {
+      void runOnOperation() override {
+        getOperation().walk([](my_dialect::MyOp op) {
+          // transform op
+        });
+      }
+    };
+    ```
+  </Step>
+  <Step title="Lower to LLVM">
+    Use the built-in conversion passes to lower your dialect through `arith`, `memref`, and `func` to the `llvm` dialect, then call `mlir::translateModuleToLLVMIR` to produce LLVM IR for code generation.
+  </Step>
+</Steps>
+
+## Python bindings
+
+MLIR provides Python bindings built on nanobind. They must be enabled at build time with `-DMLIR_ENABLE_BINDINGS_PYTHON=ON`.
+
+```python
+import mlir.ir as ir
+import mlir.dialects.func as func
+import mlir.dialects.arith as arith
+
+with ir.Context() as ctx, ir.Location.unknown():
+    module = ir.Module.create()
+    with ir.InsertionPoint(module.body):
+        i32 = ir.IntegerType.get_signless(32)
+
+        @func.FuncOp.from_py_func(i32, i32)
+        def add(a, b):
+            return arith.AddIOp(a, b).result
+
+print(module)
+```
+
+<Note>
+  The Python bindings are under active development. The `mlir.ir` core API is stable, but dialect-specific bindings may change between releases.
+</Note>
+
+## Integration with the LLVM backend
+
+MLIR's `llvm` dialect maps directly to LLVM IR instructions. The standard lowering path converts high-level MLIR dialects to the `llvm` dialect and then calls `mlir::translateModuleToLLVMIR` to obtain an `llvm::Module`. From there, the standard LLVM code generation pipeline produces object files or assembly.
+
+```
+High-level dialects (linalg, tensor, affine)
+        ↓  conversion passes
+    scf + arith + memref
+        ↓  finalize-memref-to-llvm, convert-arith-to-llvm
+        llvm dialect
+        ↓  mlir::translateModuleToLLVMIR
+        LLVM IR  →  llc / MC → object file
+```
+
+The `mlir-translate` tool handles this translation step on the command line:
+
+```bash
+mlir-translate --mlir-to-llvmir lowered.mlir -o output.ll
+llc -filetype=obj output.ll -o output.o
+```

@@ -1,0 +1,311 @@
+---
+title: "Writing an LLVM Pass"
+description: "Learn how to write an LLVM pass using the new pass manager (NPM), from setting up the build system to registering and testing your pass."
+---
+
+The LLVM pass framework is the mechanism through which most compiler transformations and analyses are implemented. Passes perform optimizations, build analysis results used by other transformations, and provide a structured way to organize compiler logic.
+
+Under the new pass manager (NPM), passes rely on concept-based polymorphism rather than virtual inheritance. Every pass inherits from the CRTP mixin `PassInfoMixin<PassT>` and implements a `run()` method that returns `PreservedAnalyses`.
+
+<Note>
+This guide covers the **new pass manager** (NPM). LLVM uses the legacy pass manager for the codegen pipeline. For the legacy API, see `WritingAnLLVMPass.rst` in the LLVM source tree.
+</Note>
+
+## The HelloWorld pass
+
+The canonical example is the `HelloWorld` pass, which prints the name of every non-external function in the module being compiled. It does not modify the IR — it only inspects it.
+
+The full implementation lives at `llvm/lib/Transforms/Utils/HelloWorld.cpp`:
+
+```cpp
+//===-- HelloWorld.cpp - Example Transformations --------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "llvm/Transforms/Utils/HelloWorld.h"
+#include "llvm/IR/Function.h"
+
+using namespace llvm;
+
+PreservedAnalyses HelloWorldPass::run(Function &F,
+                                      FunctionAnalysisManager &AM) {
+  errs() << F.getName() << "\n";
+  return PreservedAnalyses::all();
+}
+```
+
+## Setting up the build
+
+<Steps>
+  <Step title="Configure and build LLVM">
+    Follow the [Getting Started guide](https://llvm.org/docs/GettingStarted.html) to configure and build LLVM. A standard CMake invocation looks like:
+
+    ```bash
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLLVM_ENABLE_PROJECTS="clang"
+    ninja -C build opt
+    ```
+  </Step>
+
+  <Step title="Add your source file">
+    Place your pass source file under `llvm/lib/Transforms/Utils/` (or whichever subdirectory fits your pass). Add the file to `llvm/lib/Transforms/Utils/CMakeLists.txt`:
+
+    ```cmake
+    add_llvm_library(LLVMTransformsUtils
+      ...
+      HelloWorld.cpp
+      ...
+    )
+    ```
+  </Step>
+
+  <Step title="Create the header">
+    Create `llvm/include/llvm/Transforms/Utils/HelloWorld.h`:
+
+    ```cpp
+    #ifndef LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+    #define LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+
+    #include "llvm/IR/PassManager.h"
+
+    namespace llvm {
+
+    class HelloWorldPass : public PassInfoMixin<HelloWorldPass> {
+    public:
+      PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+    };
+
+    } // namespace llvm
+
+    #endif // LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+    ```
+
+    `PassInfoMixin<PassT>` sets up additional boilerplate automatically via CRTP. The `run()` signature determines what granularity the pass operates at — `Function &` means it runs once per function.
+  </Step>
+
+  <Step title="Implement the pass">
+    Create `llvm/lib/Transforms/Utils/HelloWorld.cpp` with the implementation shown above. The `run()` method receives the IR unit and an analysis manager. Return `PreservedAnalyses::all()` when the pass does not modify the IR, or `PreservedAnalyses::none()` when it does.
+  </Step>
+
+  <Step title="Register the pass">
+    Add the pass to `llvm/lib/Passes/PassRegistry.def` in the `FUNCTION_PASS` section:
+
+    ```cpp
+    FUNCTION_PASS("helloworld", HelloWorldPass())
+    ```
+
+    Then add the corresponding `#include` in `llvm/lib/Passes/PassBuilder.cpp`:
+
+    ```cpp
+    #include "llvm/Transforms/Utils/HelloWorld.h"
+    ```
+
+    `PassRegistry.def` is `#include`d into `PassBuilder.cpp` multiple times for different purposes, so both changes are required.
+  </Step>
+</Steps>
+
+## Running the pass with `opt`
+
+Build `opt` and run the pass on an LLVM IR file:
+
+```bash
+ninja -C build/ opt
+```
+
+```llvm
+; /tmp/a.ll
+define i32 @foo() {
+  %a = add i32 2, 3
+  ret i32 %a
+}
+
+define void @bar() {
+  ret void
+}
+```
+
+```bash
+build/bin/opt -disable-output /tmp/a.ll -passes=helloworld
+```
+
+Expected output:
+
+```
+foo
+bar
+```
+
+The `-disable-output` flag suppresses writing the (unchanged) bitcode to stdout.
+
+## PreservedAnalyses
+
+The `PreservedAnalyses` return value tells the pass manager which cached analysis results are still valid after the pass runs.
+
+| Return value | Meaning |
+|---|---|
+| `PreservedAnalyses::all()` | No IR was modified; all cached analyses remain valid |
+| `PreservedAnalyses::none()` | Assume all analyses are invalidated |
+| Custom set | Preserve specific analyses by calling `PA.preserve<AnalysisT>()` |
+
+```cpp
+PreservedAnalyses MyTransformPass::run(Function &F,
+                                       FunctionAnalysisManager &AM) {
+  bool Changed = runTransformation(F);
+  if (!Changed)
+    return PreservedAnalyses::all();
+
+  PreservedAnalyses PA;
+  PA.preserve<DominatorTreeAnalysis>();
+  return PA;
+}
+```
+
+## Analysis passes vs. transform passes
+
+<Tabs>
+  <Tab title="Transform pass">
+    A transform pass modifies the IR. It receives an `AnalysisManager` to query cached analyses, and returns `PreservedAnalyses` to indicate what it invalidated.
+
+    ```cpp
+    struct MyTransform : public PassInfoMixin<MyTransform> {
+      PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+        // Optionally query an analysis:
+        auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
+        // ... modify F ...
+        return PreservedAnalyses::none();
+      }
+    };
+    ```
+  </Tab>
+  <Tab title="Analysis pass">
+    An analysis pass computes and caches a result. It inherits from `AnalysisInfoMixin` and exposes a `Result` type. Other passes retrieve the result via `AM.getResult<MyAnalysis>(F)`.
+
+    ```cpp
+    struct MyAnalysis : public AnalysisInfoMixin<MyAnalysis> {
+      struct Result {
+        int SomeValue;
+      };
+
+      Result run(Function &F, FunctionAnalysisManager &AM) {
+        return Result{42};
+      }
+
+      static AnalysisKey Key;
+    };
+    ```
+  </Tab>
+</Tabs>
+
+## Passing data between passes via AnalysisManager
+
+Passes communicate through the `AnalysisManager`. A transform pass calls `AM.getResult<SomeAnalysis>(F)` to retrieve cached analysis data. The manager runs the analysis if it has not already been computed, or returns a cached result.
+
+```cpp
+PreservedAnalyses MyPass::run(Function &F, FunctionAnalysisManager &AM) {
+  // Request the loop analysis result for this function
+  auto &LI = AM.getResult<LoopAnalysis>(F);
+
+  for (Loop *L : LI) {
+    // work with loop L
+  }
+
+  return PreservedAnalyses::all();
+}
+```
+
+<Tip>
+Requesting an analysis result is cheap when the result is already cached. The pass manager handles invalidation automatically based on the `PreservedAnalyses` values returned by earlier passes.
+</Tip>
+
+## Testing the pass
+
+Add a lit regression test at `llvm/test/Transforms/Utils/helloworld.ll`:
+
+```llvm
+; RUN: opt -disable-output -passes=helloworld %s 2>&1 | FileCheck %s
+
+; CHECK: {{^}}foo{{$}}
+define i32 @foo() {
+  %a = add i32 2, 3
+  ret i32 %a
+}
+
+; CHECK-NEXT: {{^}}bar{{$}}
+define void @bar() {
+  ret void
+}
+```
+
+Run it with:
+
+```bash
+ninja -C build check-llvm
+# or to run just this test:
+llvm-lit llvm/test/Transforms/Utils/helloworld.ll
+```
+
+## Registering passes as plugins
+
+LLVM supports out-of-tree pass plugins that can be loaded dynamically into `opt` or `clang`.
+
+<Steps>
+  <Step title="Create a CMake project">
+    At the root of the repo (alongside other projects), create a `CMakeLists.txt`:
+
+    ```cmake
+    add_llvm_pass_plugin(MyPassName source.cpp)
+    ```
+
+    Pass plugins are compiled and linked dynamically by default. Set `LLVM_${NAME}_LINK_INTO_TOOLS` to `ON` for a statically linked extension.
+  </Step>
+
+  <Step title="Provide the plugin entry point">
+    The pass must expose at least one of these entry points:
+
+    ```cpp
+    // For static registration
+    llvm::PassPluginLibraryInfo getMyPassPluginInfo();
+
+    // For dynamic loading (note LLVM_ATTRIBUTE_WEAK for shared libraries)
+    extern "C" ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo()
+        LLVM_ATTRIBUTE_WEAK;
+    ```
+  </Step>
+
+  <Step title="Load the plugin with opt">
+    ```bash
+    opt -load-pass-plugin=./MyPass.so -passes=my-pass input.ll -o output.ll
+    ```
+  </Step>
+</Steps>
+
+To register a dynamically loaded plugin with `PassBuilder` programmatically:
+
+```cpp
+auto Plugin = PassPlugin::Load(PathToPlugin);
+if (!Plugin)
+  report_error();
+Plugin.registerPassBuilderCallbacks(PB);
+```
+
+For a complete in-tree example, see `llvm/examples/Bye/`.
+
+## Required passes
+
+A pass that defines a static `isRequired()` method returning `true` cannot be skipped, even on functions with the `optnone` attribute:
+
+```cpp
+class HelloWorldPass : public PassInfoMixin<HelloWorldPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+
+  static bool isRequired() { return true; }
+};
+```
+
+`AlwaysInlinerPass` is a canonical example — it must always run to preserve `alwaysinline` semantics.

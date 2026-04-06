@@ -1,0 +1,164 @@
+---
+title: "LLD"
+description: "A fast, modular, cross-platform linker built as part of the LLVM project, designed as a drop-in replacement for GNU ld, ld64, and link.exe."
+---
+
+LLD is the LLVM project's linker. It supports ELF (Linux and BSD), PE/COFF (Windows), Mach-O (macOS), and WebAssembly targets from a single binary. LLD is always a cross-linker: every build supports all targets regardless of how it was configured.
+
+## Frontends
+
+LLD consists of several target-specific linker implementations behind a shared driver:
+
+<CardGroup cols={2}>
+  <Card title="ELF" icon="linux">
+    Used on Linux, FreeBSD, and other Unix systems. The most complete LLD frontend. Installed as `ld.lld`. Accepts the same command-line arguments and linker scripts as GNU ld and GNU gold.
+  </Card>
+  <Card title="PE/COFF" icon="windows">
+    Used on Windows. Installed as `lld-link`. Includes Windows debug info (PDB) support and is compatible with the Microsoft `link.exe` interface.
+  </Card>
+  <Card title="Mach-O" icon="apple">
+    Used on macOS and iOS. Installed as `ld64.lld`. Targets Apple platforms and is compatible with the Apple `ld` interface.
+  </Card>
+  <Card title="WebAssembly" icon="globe">
+    Produces `.wasm` output for browser and server-side WebAssembly targets. Installed as `wasm-ld`.
+  </Card>
+</CardGroup>
+
+## Performance
+
+LLD links significantly faster than GNU ld and GNU gold, particularly for large programs, because it parallelizes work across all available CPU cores.
+
+Benchmark on a 20-core (40-thread) Xeon E5-2680 2.80 GHz machine with SSD:
+
+| Program | Output size | GNU ld | GNU gold (threads) | LLD (threads) |
+|---------|------------|--------|--------------------|---------------|
+| ffmpeg (debug) | 92 MiB | 1.72s | 1.01s | **0.35s** |
+| mysqld (debug) | 154 MiB | 8.50s | 2.68s | **0.68s** |
+| clang (debug) | 1.67 GiB | 104.03s | 23.49s | **5.28s** |
+| chromium (debug) | 1.14 GiB | 209.05s | 60.82s | **16.70s** |
+
+<Note>
+  Results vary depending on the number of available CPU cores, available memory, and disk speed. The figures above are from the LLD documentation benchmark suite.
+</Note>
+
+## Using LLD
+
+<Tabs>
+  <Tab title="With Clang">
+    Pass `-fuse-ld=lld` to the Clang driver to select LLD instead of the system linker:
+
+    ```bash
+    clang++ -fuse-ld=lld -o app main.cpp
+    ```
+
+    To make LLD the default for a project, add it to your `LDFLAGS`:
+
+    ```bash
+    export LDFLAGS="-fuse-ld=lld"
+    cmake -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" ..
+    ```
+  </Tab>
+  <Tab title="Direct invocation (ELF)">
+    `ld.lld` accepts the same flags as GNU ld:
+
+    ```bash
+    ld.lld -o app main.o libfoo.a -lc
+    ```
+  </Tab>
+  <Tab title="Windows (lld-link)">
+    ```bat
+    lld-link /out:app.exe main.obj foo.lib
+    ```
+  </Tab>
+  <Tab title="Verify LLD was used">
+    Check the `.comment` section of a linked binary to confirm LLD was used:
+
+    ```bash
+    readelf --string-dump .comment app | grep LLD
+    ```
+  </Tab>
+</Tabs>
+
+## Key flags and options
+
+The ELF frontend accepts the same flags as GNU ld. Commonly used options:
+
+```bash
+# Link-time optimization (LTO) — pass -flto to clang as well
+clang++ -flto -fuse-ld=lld -O2 -o app main.cpp
+
+# Identical code folding (reduces binary size)
+ld.lld -icf=all -o app main.o
+
+# Emit a map file listing symbol locations
+ld.lld -Map=app.map -o app main.o
+
+# Build a shared library
+ld.lld -shared -o libfoo.so foo.o
+
+# Set the dynamic linker path
+ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 -o app main.o
+
+# Disable multithreading (useful for reproducible builds)
+ld.lld --no-threads -o app main.o
+```
+
+### Supported architectures
+
+The ELF frontend supports: AArch64, AMDGPU, ARM (≥v4), Hexagon, LoongArch, MIPS 32/64 (big and little endian), PowerPC, PowerPC64, RISC-V, SPARC V9, x86-32, and x86-64.
+
+<Tip>
+  AArch64, ARM (≥v4), LoongArch, PowerPC, PowerPC64, RISC-V, x86-32, and x86-64 have production-quality support. MIPS support is functional but less exercised.
+</Tip>
+
+## Linker script support
+
+LLD's ELF frontend supports GNU linker scripts for controlling the output layout. Place the script in a `.ld` file and pass it on the command line:
+
+```text linker.ld
+SECTIONS {
+  . = 0x10000;
+  .text : { *(.text) }
+  . = 0x8000000;
+  .data : { *(.data) }
+  .bss  : { *(.bss) }
+}
+```
+
+```bash
+ld.lld -T linker.ld -o firmware main.o
+```
+
+<Warning>
+  Some very old GNU linker script features targeting pre-1990s Unix systems are not supported. Modern scripts work correctly.
+</Warning>
+
+## Link-time optimization (LTO)
+
+LLD supports both full LTO and ThinLTO natively. With `-flto`, Clang emits LLVM bitcode instead of object files, and LLD compiles and links the whole program together:
+
+```bash
+# Full LTO
+clang++ -flto -O2 -fuse-ld=lld -o app main.cpp util.cpp
+
+# ThinLTO (faster, parallel, supports incremental builds)
+clang++ -flto=thin -O2 -fuse-ld=lld -o app main.cpp util.cpp
+```
+
+## Embedding LLD in your program
+
+LLD can be embedded as a library. Construct the argument list as you would for a command-line invocation and call `lld::lldMain`:
+
+```cpp
+#include "lld/Common/Driver.h"
+
+LLD_HAS_DRIVER(elf)
+
+int main() {
+  std::vector<const char *> args = {"ld.lld", "-o", "out", "main.o"};
+  lld::Result result = lld::lldMain(
+      args, llvm::outs(), llvm::errs(),
+      {{lld::Gnu, &lld::elf::link}});
+  return result.retCode;
+}
+```

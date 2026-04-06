@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "LLVM",
+  "projectType": "framework",
+  "projectName": "LLVM",
+  "projectDescription": "LLVM is a collection of modular, reusable compiler and toolchain technologies that provides a framework for building compilers, optimizers, and code generation backends.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#525761",
-    "light": "#c4c8cc"
-  },
-  "favicon": "https://media.brand.dev/babe255d-c05d-4613-8261-25933c0f5ed2.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/llvm/llvm-project"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/llvm/llvm-project"
-    }
-  },
+  "primaryColor": "#525761",
+  "lightColor": "#c4c8cc",
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -101,5 +89,36 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "LLVM Intermediate Representation (IR) — a portable, SSA-based assembly language",
+    "Modular pass framework for analysis and transformation of code",
+    "Target-independent code generation backend with support for many architectures (x86, ARM, RISC-V, AMDGPU, etc.)",
+    "Clang — a C/C++/Objective-C compiler frontend built on LLVM",
+    "LLD — a fast, drop-in replacement linker",
+    "LLDB — a modern debugger using LLVM libraries",
+    "MLIR — multi-level intermediate representation for reusable compiler infrastructure",
+    "Flang — a Fortran frontend and runtime",
+    "JIT compilation support via ORC and MCJIT",
+    "TableGen — a domain-specific language for describing hardware targets"
+  ],
+  "publicApiSurface": [
+    "llvm::Module — top-level container for LLVM IR",
+    "llvm::Function — represents an LLVM IR function",
+    "llvm::IRBuilder<> — helper for emitting LLVM IR",
+    "llvm::PassManager — manages and runs passes on IR units",
+    "llvm::AnalysisManager — manages analysis results for IR units",
+    "llvm::TargetMachine — abstract interface for machine code generation",
+    "llvm::LLVMContext — opaque context for LLVM operations",
+    "llvm::Value / llvm::Instruction — base classes for IR values and instructions",
+    "llvm::Type — represents LLVM types in the IR",
+    "llvm::ExecutionEngine — JIT compilation interface",
+    "opt — command-line tool to run optimization passes",
+    "llc — LLVM static compiler (IR to machine code)",
+    "lli — LLVM interpreter and JIT runner",
+    "clang — C/C++/Objective-C compiler driver",
+    "lld — LLVM linker",
+    "llvm-as / llvm-dis — assembler/disassembler for LLVM bitcode",
+    "llvm-objdump / llvm-nm / llvm-readobj — binary inspection tools"
+  ]
 }

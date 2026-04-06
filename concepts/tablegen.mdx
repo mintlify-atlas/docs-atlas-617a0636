@@ -1,0 +1,200 @@
+---
+title: "TableGen"
+description: "TableGen is LLVM's domain-specific language for describing hardware: instruction definitions, register files, calling conventions, and more."
+keywords: ["TableGen", "llvm-tblgen", "target description", "instruction definition", "register definition", ".td files"]
+---
+
+TableGen is a domain-specific language and tool used to help a human develop and maintain records of domain-specific information. In the LLVM project its primary purpose is describing target hardware: instruction encodings, register files, calling conventions, and subtarget features. Because there can be a large number of these records, TableGen is specifically designed to allow writing flexible descriptions and to factor out common features, reducing duplication and the chance of error.
+
+The TableGen front end parses `.td` files, instantiates all declarations, and hands the result to a domain-specific **backend** for processing into C++ header files that are compiled directly into the LLVM build.
+
+## What TableGen is used for
+
+The major users of TableGen in LLVM are:
+
+<CardGroup cols={2}>
+  <Card title="Target code generator" icon="cpu">
+    Instruction definitions, register descriptions, register classes, calling conventions, scheduling models, and subtarget features for every LLVM backend. Almost everything in `lib/Target/*/` depends on TableGen-generated files.
+  </Card>
+  <Card title="Clang diagnostics and attributes" icon="message-circle">
+    Clang uses TableGen to define diagnostic messages and compiler attributes, keeping descriptions and their generated code in sync automatically.
+  </Card>
+</CardGroup>
+
+## The llvm-tblgen tool
+
+TableGen files are processed by `llvm-tblgen`, which is built in your LLVM build directory under `bin/`. It is not installed system-wide because it has no use outside the LLVM build process.
+
+```bash running llvm-tblgen
+# Print all definitions that subclass Register for X86
+$ llvm-tblgen X86.td -print-enums -class=Register
+
+# Print all Instruction definitions for X86
+$ llvm-tblgen X86.td -print-enums -class=Instruction
+
+# Dump all records as JSON
+$ llvm-tblgen X86.td -dump-json
+
+# Print all expanded records (default — useful for debugging .td files)
+$ llvm-tblgen X86.td
+```
+
+With no backend flag, `llvm-tblgen` prints all classes and definitions in their fully expanded form. This is useful for inspecting what a definition actually expands to after inheritance and template instantiation.
+
+## Basic TableGen syntax
+
+TableGen has a syntax loosely based on C++ templates, with built-in types and additional automation concepts.
+
+### Records: classes and definitions
+
+TableGen files consist of two key parts: **classes** (abstract records) and **definitions** (concrete records). Both are referred to as "records".
+
+<Tabs>
+  <Tab title="def — concrete record">
+    A `def` creates a fully instantiated record. Definitions generally do not have any undefined values.
+
+    ```tablegen def — concrete record
+    def FeatureFPARMv8 : SubtargetFeature<"fp-armv8", "HasFPARMv8", "true",
+                                          "Enable ARMv8 FP">;
+    ```
+
+    Here `FeatureFPARMv8` is a `SubtargetFeature` record initialized with specific values.
+  </Tab>
+  <Tab title="class — abstract record">
+    A `class` defines an abstract template that other records can inherit from. Classes can take parameters.
+
+    ```tablegen class — abstract record with parameters
+    class ProcNoItin<string Name, list<SubtargetFeature> Features>
+          : Processor<Name, NoItineraries, Features>;
+    ```
+
+    `ProcNoItin` specializes `Processor` by hard-coding `NoItineraries`, while forwarding `Name` and `Features`.
+  </Tab>
+  <Tab title="multiclass — multiple definitions">
+    A `multiclass` instantiates multiple definitions at once. Each instantiation can produce many records.
+
+    ```tablegen multiclass — instantiate multiple defs at once
+    multiclass ro_signed_pats<string T, string Rm, dag Base, dag Offset, dag Extend,
+                              dag address, ValueType sty> {
+      def : Pat<(i32 (!cast<SDNode>("sextload" # sty) address)),
+                (!cast<Instruction>("LDRS" # T # "w_" # Rm # "_RegOffset")
+                  Base, Offset, Extend)>;
+
+      def : Pat<(i64 (!cast<SDNode>("sextload" # sty) address)),
+                (!cast<Instruction>("LDRS" # T # "x_" # Rm # "_RegOffset")
+                  Base, Offset, Extend)>;
+    }
+    ```
+  </Tab>
+  <Tab title="let — override values">
+    The `let` keyword overrides field values in a scope. It is used to set properties on one or more definitions without repeating them:
+
+    ```tablegen let — override fields in a scope
+    let Defs = [EFLAGS],
+        isCommutable = 1,                  // X = ADD Y,Z --> X = ADD Z,Y
+        isConvertibleToThreeAddress = 1 in // Can transform into LEA.
+    def ADD32rr  : I<0x01, MRMDestReg, (outs GR32:$dst),
+                                       (ins GR32:$src1, GR32:$src2),
+                     "add{l}\t{$src2, $dst|$dst, $src2}",
+                     [(set GR32:$dst, (add GR32:$src1, GR32:$src2))]>;
+    ```
+  </Tab>
+</Tabs>
+
+## A real example: X86 ADD32rr
+
+The following shows how a single compact TableGen definition expands into the full record that the code generator uses. The input definition:
+
+```tablegen X86 ADD32rr — source definition
+let Defs = [EFLAGS],
+    isCommutable = 1,                  // X = ADD Y,Z --> X = ADD Z,Y
+    isConvertibleToThreeAddress = 1 in // Can transform into LEA.
+def ADD32rr  : I<0x01, MRMDestReg, (outs GR32:$dst),
+                                   (ins GR32:$src1, GR32:$src2),
+               "add{l}\t{$src2, $dst|$dst, $src2}",
+               [(set GR32:$dst, (add GR32:$src1, GR32:$src2))]>;
+```
+
+When `llvm-tblgen` expands this, it produces the full record shown below. All fields inherited from the `I` and `X86Inst` classes are filled in with their resolved values:
+
+```text expanded ADD32rr record (output of llvm-tblgen)
+def ADD32rr {   // Instruction X86Inst I
+  string Namespace = "X86";
+  dag OutOperandList = (outs GR32:$dst);
+  dag InOperandList = (ins GR32:$src1, GR32:$src2);
+  string AsmString = "add{l}\t{$src2, $dst|$dst, $src2}";
+  list<dag> Pattern = [(set GR32:$dst, (add GR32:$src1, GR32:$src2))];
+  list<Register> Uses = [];
+  list<Register> Defs = [EFLAGS];
+  bit isReturn = 0;
+  bit isBranch = 0;
+  bit isBarrier = 0;
+  bit isCall = 0;
+  bit mayLoad = 0;
+  bit mayStore = 0;
+  bit isCommutable = 1;
+  bit isConvertibleToThreeAddress = 1;
+  bit isTerminator = 0;
+  bits<8> Opcode = { 0, 0, 0, 0, 0, 0, 0, 1 };
+  Format Form = MRMDestReg;
+  ...
+}
+```
+
+This definition corresponds to the 32-bit register-register `add` instruction of x86. A lot of information is needed for every instruction, and specifying it all manually would be unmaintainable and error-prone. TableGen derives all of this from the compact source definition by following the class hierarchy.
+
+## How TableGen integrates with code generation
+
+The LLVM code generator uses TableGen to describe large chunks of the target machine. Target description files (`.td`) live alongside the C++ target source in `lib/Target/*/`. During the build, CMake invokes `llvm-tblgen` with the appropriate backend flag to generate C++ header files that are included by the target implementation.
+
+<AccordionGroup>
+  <Accordion title="Register information">
+    `TargetRegisterInfo` implementations are auto-generated from `.td` descriptions of the register file. Each register is defined with its name, aliases, and the register classes it belongs to. `llvm-tblgen -gen-register-info` produces the `*GenRegisterInfo.inc` file.
+  </Accordion>
+  <Accordion title="Instruction information">
+    `TargetInstrInfo` implementations are auto-generated from instruction definitions. Each `def` that subclasses `Instruction` produces an entry in the opcode enum and tables of instruction metadata. `llvm-tblgen -gen-instr-info` produces `*GenInstrInfo.inc`.
+  </Accordion>
+  <Accordion title="Instruction selection patterns">
+    The `Pattern` field in instruction definitions (e.g., `[(set GR32:$dst, (add GR32:$src1, GR32:$src2))]`) is used by the SelectionDAG instruction selector to match IR patterns to target instructions. `llvm-tblgen -gen-dag-isel` produces the `*GenDAGISel.inc` file that drives pattern matching.
+  </Accordion>
+  <Accordion title="Calling conventions">
+    Calling convention rules for passing and returning values are described with `CallingConv` records in `.td` files and generated with `llvm-tblgen -gen-callingconv`.
+  </Accordion>
+  <Accordion title="Subtarget features">
+    CPU features and scheduling models are described with `SubtargetFeature` and `SchedMachineModel` records. Generated with `llvm-tblgen -gen-subtarget`.
+  </Accordion>
+</AccordionGroup>
+
+## TableGen backends
+
+A TableGen file has no meaning without a backend. Backends interpret the internal record representation and generate output — typically large C++ include files.
+
+```bash common llvm-tblgen backend flags
+# Generate register info (TargetRegisterInfo)
+llvm-tblgen -gen-register-info
+
+# Generate instruction info (TargetInstrInfo)
+llvm-tblgen -gen-instr-info
+
+# Generate SelectionDAG instruction selector
+llvm-tblgen -gen-dag-isel
+
+# Generate calling convention tables
+llvm-tblgen -gen-callingconv
+
+# Generate subtarget feature/scheduling info
+llvm-tblgen -gen-subtarget
+
+# Dump all records as JSON (useful for custom backends or scripts)
+llvm-tblgen -dump-json
+```
+
+You can extend TableGen by writing a new backend in C++ (adding to `llvm/utils/TableGen/`) or by consuming the `-dump-json` output from any scripting language.
+
+<Info>
+  Editor support for `.td` files is available. An emacs "TableGen mode" is in `llvm/utils/emacs` and a vim language file is in `llvm/utils/vim` in your LLVM distribution.
+</Info>
+
+<Tip>
+  The [TableGen Programmer's Reference](https://llvm.org/docs/TableGen/ProgRef.html) provides an in-depth description of the full language. The [TableGen BackEnds](https://llvm.org/docs/TableGen/BackEnds.html) page lists all available backends and their flags.
+</Tip>

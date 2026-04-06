@@ -1,0 +1,218 @@
+---
+title: "Getting started"
+description: "Clone the LLVM monorepo, configure a build with CMake, and compile your first program using the LLVM toolchain."
+---
+
+## Prerequisites
+
+Before you begin, make sure the following tools are installed on your system.
+
+<Tabs>
+  <Tab title="Linux">
+    Install the required packages using your distribution's package manager. The example below uses apt (Debian/Ubuntu):
+
+    ```bash
+    sudo apt-get install git cmake ninja-build python3 gcc g++ zlib1g-dev
+    ```
+
+    - **CMake** >= 3.20.0
+    - **Python** >= 3.8 (required to run the test suite)
+    - **C++ toolchain**: GCC >= 7.4 or Clang >= 5.0
+    - **Ninja** (recommended) or GNU Make >= 3.79
+    - **zlib** >= 1.2.3.4 (optional, adds compression support to LLVM tools)
+  </Tab>
+  <Tab title="macOS">
+    Install Xcode command-line tools, which provide Clang, Make, and Git:
+
+    ```bash
+    xcode-select --install
+    ```
+
+    Then install CMake and Ninja via Homebrew:
+
+    ```bash
+    brew install cmake ninja python3
+    ```
+
+    - **CMake** >= 3.20.0
+    - **Python** >= 3.8
+    - **Apple Clang** >= 10.0 (included with a sufficiently modern Xcode)
+    - **Ninja** (recommended)
+  </Tab>
+  <Tab title="Windows">
+    - **Visual Studio** 2019 or later with the **Desktop development with C++** workload
+    - **CMake** >= 3.21.0 (bundled with Visual Studio 2019+)
+    - **Python** >= 3.8 — install from [python.org](https://www.python.org/) and add to `PATH`
+    - **Git for Windows** (bundled with Visual Studio 2019+)
+
+    Run all commands in a **Developer Command Prompt for VS 2019** (or later) launched as administrator.
+
+    Do not install LLVM into a path that contains spaces (e.g., avoid `C:\Documents and Settings\...`).
+  </Tab>
+</Tabs>
+
+**Minimum compiler versions supported as the host C++ toolchain:**
+
+| Compiler | Minimum version |
+|---|---|
+| GCC | 7.4 |
+| Clang | 5.0 |
+| Apple Clang | 10.0 |
+| Visual Studio | 2019 (16.8) |
+
+**Disk space:** A debug build of LLVM alone needs 1–3 GB. A full debug build of LLVM and Clang needs around 15–20 GB. A release build requires considerably less space.
+
+## Clone and build
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the full LLVM monorepo from GitHub:
+
+    ```bash
+    git clone https://github.com/llvm/llvm-project.git
+    ```
+
+    On Windows, disable automatic line-ending conversion:
+
+    ```bash
+    git clone --config core.autocrlf=false https://github.com/llvm/llvm-project.git
+    ```
+
+    <Tip>
+      To save time and disk space on the first checkout, use a **shallow clone** that fetches only the latest revision:
+
+      ```bash
+      git clone --depth 1 https://github.com/llvm/llvm-project.git
+      ```
+
+      You can deepen the history later with `git fetch --unshallow` if needed. You can also reduce fetch noise by filtering out stacked-PR and revert branches:
+
+      ```bash
+      git config --add remote.origin.fetch '^refs/heads/users/*'
+      git config --add remote.origin.fetch '^refs/heads/revert-*'
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Configure with CMake">
+    Change into the cloned directory and run CMake against the `llvm` subdirectory. The example below configures a debug build using Ninja and enables the Clang frontend:
+
+    ```bash
+    cd llvm-project
+    cmake -S llvm -B build \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DLLVM_ENABLE_PROJECTS="clang"
+    ```
+
+    To build only LLVM without any sub-projects, omit the `-DLLVM_ENABLE_PROJECTS` flag:
+
+    ```bash
+    cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+    ```
+
+    See [Building LLVM](/building-llvm) for the full list of CMake options.
+  </Step>
+
+  <Step title="Build">
+    Run the build. Ninja runs parallel jobs by default:
+
+    ```bash
+    ninja -C build
+    ```
+
+    If you are using Unix Makefiles, pass `-j` to enable parallel compilation:
+
+    ```bash
+    make -C build -j$(nproc)
+    ```
+
+    The build produces executables under `build/bin/`. A full debug build may take 30–90 minutes depending on your hardware.
+  </Step>
+
+  <Step title="Verify the build">
+    Check that the compiler and LLVM backend were built correctly:
+
+    ```bash
+    ./build/bin/clang --version
+    ./build/bin/llc --version
+    ```
+
+    You should see output similar to:
+
+    ```
+    clang version 20.0.0 (https://github.com/llvm/llvm-project.git ...)
+    Target: x86_64-unknown-linux-gnu
+    Thread model: posix
+    ```
+  </Step>
+
+  <Step title="Run the test suite (optional)">
+    Run the LLVM regression tests to verify your build:
+
+    ```bash
+    ninja -C build check-llvm
+    ```
+
+    To run the Clang tests as well:
+
+    ```bash
+    ninja -C build check-clang
+    ```
+
+    To run all tests across all enabled sub-projects:
+
+    ```bash
+    ninja -C build check-all
+    ```
+  </Step>
+</Steps>
+
+## Compile a program with Clang
+
+Once the build is complete, you can compile a C program using the just-built Clang:
+
+```c hello.c
+#include <stdio.h>
+
+int main() {
+  printf("hello world\n");
+  return 0;
+}
+```
+
+Compile and run it:
+
+```bash
+./build/bin/clang hello.c -o hello
+./hello
+```
+
+To compile to LLVM bitcode and inspect the IR:
+
+```bash
+./build/bin/clang -O3 -emit-llvm hello.c -c -o hello.bc
+./build/bin/llvm-dis < hello.bc | less
+```
+
+To compile the bitcode to native assembly using `llc`:
+
+```bash
+./build/bin/llc hello.bc -o hello.s
+```
+
+## Install LLVM
+
+To install the built tools and libraries to a prefix of your choice, configure with `-DCMAKE_INSTALL_PREFIX` and run the `install` target:
+
+```bash
+cmake -S llvm -B build \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_PROJECTS="clang;lld" \
+  -DCMAKE_INSTALL_PREFIX=/usr/local/llvm
+
+ninja -C build install
+```
+
+The default install prefix is `/usr/local`.

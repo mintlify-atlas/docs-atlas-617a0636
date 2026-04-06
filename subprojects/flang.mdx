@@ -1,0 +1,173 @@
+---
+title: "Flang"
+description: "The LLVM Fortran compiler — a ground-up implementation of a Fortran frontend in modern C++, formerly known as f18, targeting full Fortran 2018 support."
+---
+
+Flang is the Fortran frontend in the LLVM project. It started as the f18 project (originally hosted at `github.com/flang-compiler/f18`) with the goal of replacing the earlier Flang compiler (`github.com/flang-compiler/flang`) and addressing its deficiencies. f18 was accepted into the LLVM project and renamed Flang.
+
+<Warning>
+  Flang is not yet ready for production use. The two major missing features are coarrays and parameterized derived types (PDTs) with length type parameters.
+</Warning>
+
+## Compiler architecture
+
+Flang transforms Fortran source into executable code in three high-level phases:
+
+<Steps>
+  <Step title="Analysis">
+    Flang prescans and preprocesses the source, parses it into a decorated parse tree, and performs semantic analysis that builds the symbol table and validates the program. All user-facing errors are detected here.
+  </Step>
+  <Step title="Lowering">
+    The parse tree and symbol table are lowered to FIR (Fortran Intermediate Representation), which is a dialect of MLIR. A series of MLIR passes verify, optimize, and transform FIR into LLVM IR.
+  </Step>
+  <Step title="Code generation and linking">
+    LLVM's existing infrastructure generates machine code from the LLVM IR. The Flang driver then invokes a linker to produce the final executable.
+  </Step>
+</Steps>
+
+## Supported Fortran standards
+
+| Standard | Status |
+|----------|--------|
+| FORTRAN 77 | Fully supported |
+| Fortran 90 | Fully supported |
+| Fortran 95 | Fully supported |
+| Fortran 2003 | Fully supported (see notes) |
+| Fortran 2008 | Mostly supported (see notes) |
+| Fortran 2018 | Mostly supported (see notes) |
+| Fortran 2023 | Partial |
+
+**Fortran 2003 exceptions:** Parameterized Derived Types with length type parameters are not yet implemented. Allocation to whole allocatable variables inside `FORALL` is not implemented.
+
+**Fortran 2008 exceptions:** Coarrays are not lowered or supported at runtime. `DO CONCURRENT` runs sequentially (parallel support is in progress).
+
+**Fortran 2018 exceptions:** Most unsupported features relate to multi-image (coarray) execution. Single-image Fortran 2018 is well-supported.
+
+## Compiling Fortran with Flang
+
+<Tabs>
+  <Tab title="Basic compilation">
+    ```bash
+    # Compile a Fortran source file to an executable
+    flang hello.f90 -o hello
+
+    # Compile a fixed-form Fortran 77 source file
+    flang -ffixed-form program.f -o program
+
+    # Compile to an object file
+    flang -c module.f90 -o module.o
+
+    # Link multiple objects
+    flang main.o module.o -o app
+    ```
+  </Tab>
+  <Tab title="Optimization">
+    ```bash
+    # Release build with optimization
+    flang -O2 solver.f90 -o solver
+
+    # Debug build
+    flang -O0 -g solver.f90 -o solver
+    ```
+  </Tab>
+  <Tab title="Inspecting intermediate output">
+    ```bash
+    # Dump the cooked (prescanned) character stream
+    flang -fc1 -E src.f90
+
+    # Dump the parse tree after semantic analysis
+    flang -fc1 -fdebug-dump-parse-tree src.f90
+
+    # Dump the symbol table
+    flang -fc1 -fdebug-dump-symbols src.f90
+
+    # Emit FIR (Fortran IR, an MLIR dialect)
+    flang -fc1 -emit-mlir src.f90 -o src.mlir
+
+    # Emit LLVM IR
+    flang -fc1 -emit-llvm src.f90 -o src.ll
+    ```
+  </Tab>
+  <Tab title="OpenMP">
+    ```bash
+    # Enable OpenMP
+    flang -fopenmp parallel.f90 -o parallel
+    ```
+  </Tab>
+</Tabs>
+
+## Hello world example
+
+```fortran hello.f90
+program hello
+  implicit none
+  print *, "Hello from Flang!"
+end program hello
+```
+
+```bash
+flang hello.f90 -o hello
+./hello
+# Hello from Flang!
+```
+
+## Differences from classic Flang (f18)
+
+The LLVM Flang (previously called f18) is a complete rewrite in modern C++17 and is architecturally different from the earlier "classic Flang" (`flang-compiler/flang`):
+
+| Aspect | LLVM Flang (this project) | Classic Flang |
+|--------|--------------------------|---------------|
+| Implementation language | C++17 | C/C++ with older standards |
+| Frontend AST | Decorated parse tree | PGI-derived AST |
+| IR | FIR (MLIR dialect) → LLVM IR | ILMM/PGI IR → LLVM IR |
+| Diagnostics | Clang-style, high quality | PGI-style |
+| Status | Active development, not production-ready | Maintenance mode |
+
+<Note>
+  The LLVM project only maintains the new Flang (f18-derived). The classic Flang compiler is no longer actively developed.
+</Note>
+
+## Runtime library (flang-rt)
+
+Flang executables depend on `flang-rt`, the Flang runtime library. It provides support for I/O, intrinsic math functions, and runtime type information.
+
+`flang-rt` is built as part of the LLVM runtimes build infrastructure. Enable it with `-DLLVM_ENABLE_RUNTIMES=flang-rt`:
+
+```bash
+cmake \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_PROJECTS="clang;mlir;flang" \
+  -DLLVM_ENABLE_RUNTIMES="flang-rt;openmp" \
+  ../llvm-project/llvm
+
+ninja
+ninja check-flang check-flang-rt
+```
+
+`flang-rt` also supports experimental GPU offload builds for AMDGPU and NVPTX targets using the CMake cache file provided by the `offload` subproject.
+
+## Building Flang
+
+Flang requires MLIR and Clang to be built as part of the same LLVM tree:
+
+```bash
+git clone https://github.com/llvm/llvm-project.git
+mkdir build && cd build
+
+cmake \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DLLVM_TARGETS_TO_BUILD=host \
+  -DLLVM_ENABLE_PROJECTS="clang;mlir;flang" \
+  -DLLVM_ENABLE_RUNTIMES="compiler-rt;flang-rt;openmp" \
+  ../llvm-project/llvm
+
+ninja
+ninja check-flang
+```
+
+<Tip>
+  Flang is written in C++17. It has been tested with GCC 7.2 through 9.3 and with Clang 7 through 10. 32-bit CPUs are not supported.
+</Tip>

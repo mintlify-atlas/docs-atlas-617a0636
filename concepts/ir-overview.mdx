@@ -1,0 +1,178 @@
+---
+title: "LLVM Intermediate Representation"
+description: "An overview of LLVM IR: its three forms, key constructs, type system, and SSA-based design."
+keywords: ["LLVM IR", "SSA", "bitcode", "LLVM assembly", "intermediate representation"]
+---
+
+LLVM IR is the common code representation used throughout all phases of the LLVM compilation strategy. It is a Static Single Assignment (SSA) based representation that provides type safety, low-level operations, flexibility, and the capability of representing all high-level languages cleanly.
+
+The representation aims to be light-weight and low-level while being expressive, typed, and extensible at the same time. It acts as a "universal IR": low-level enough that high-level ideas can be cleanly mapped to it, yet typed enough that optimizations like pointer analysis can promote C automatic variables from memory locations to simple SSA values.
+
+## Three forms of LLVM IR
+
+LLVM IR exists in three equivalent forms. You can convert between them freely without loss of information.
+
+<Tabs>
+  <Tab title="In-memory IR">
+    The in-memory form is used by the compiler during compilation. Passes read and transform it directly through the C++ API using classes such as `Module`, `Function`, `BasicBlock`, and `Instruction`. This form is never written to disk directly.
+  </Tab>
+  <Tab title="Bitcode (.bc)">
+    The bitcode form is a compact binary serialization of the in-memory IR, suitable for fast loading by a Just-In-Time compiler or for link-time optimization (LTO). Produced with `llvm-as` or `clang -emit-llvm -c`.
+
+    ```bash
+    clang -emit-llvm -c example.c -o example.bc
+    llvm-dis example.bc -o example.ll
+    ```
+  </Tab>
+  <Tab title="Assembly (.ll)">
+    The human-readable assembly form is what this document describes. It is useful for debugging and visualizing transformations. Produced with `clang -emit-llvm -S` or `llvm-dis`.
+
+    ```bash
+    clang -emit-llvm -S example.c -o example.ll
+    llvm-as example.ll -o example.bc
+    ```
+  </Tab>
+</Tabs>
+
+## Key IR constructs
+
+LLVM IR is organized into a strict hierarchy of objects. Every value in the IR is an instance of the `Value` class, which is the base of the entire IR type hierarchy.
+
+<CardGroup cols={2}>
+  <Card title="Module" icon="box">
+    The top-level container. Each module corresponds to a translation unit and contains functions, global variables, and symbol table entries. Modules can be linked together with the LLVM linker.
+  </Card>
+  <Card title="Function" icon="code">
+    Defines a function with a signature and a body made up of basic blocks. Functions are global values referenced with the `@` prefix.
+  </Card>
+  <Card title="BasicBlock" icon="layers">
+    A sequence of instructions with a single entry point and a single terminator (e.g., `ret`, `br`). Control flow only enters at the top and exits at the bottom.
+  </Card>
+  <Card title="Instruction" icon="zap">
+    The atomic unit of computation. Each instruction produces at most one value and operates on typed operands. All instructions are in SSA form.
+  </Card>
+</CardGroup>
+
+## A real IR example
+
+The following module declares a string constant, imports `puts`, and defines a `main` function that calls it.
+
+```llvm hello-world module
+; Declare the string constant as a global constant.
+@.str = private unnamed_addr constant [13 x i8] c"hello world\0A\00"
+
+; External declaration of the puts function
+declare i32 @puts(ptr captures(none)) nounwind
+
+; Definition of main function
+define i32 @main() {
+  ; Call puts function to write out the string to stdout.
+  call i32 @puts(ptr @.str)
+  ret i32 0
+}
+```
+
+Key points from this example:
+
+- Global identifiers (functions, global variables) begin with `@`. Local identifiers (register names) begin with `%`.
+- Comments are delimited with `;` and go to end of line.
+- `private` is a linkage type that makes the symbol invisible outside the module.
+- `nounwind` is a function attribute indicating the function never throws.
+
+Here is a simpler arithmetic function to show SSA naming and instruction structure:
+
+```llvm multiply by 8 — three equivalent forms
+; Easy way: single multiply
+%result = mul i32 %X, 8
+
+; Strength-reduced: left shift by 3
+%result = shl i32 %X, 3
+
+; Explicit additions — shows unnamed temporaries
+%0 = add i32 %X, %X    ; yields i32:%0
+%1 = add i32 %0, %0    ; yields i32:%1
+%result = add i32 %1, %1
+```
+
+Unnamed temporaries are numbered sequentially per function, starting at 0. Basic blocks and unnamed function parameters share this counter.
+
+## Type system
+
+LLVM IR is fully typed. Every value has a type, and instructions are typed. The type system includes:
+
+<AccordionGroup>
+  <Accordion title="Integer types">
+    Arbitrary-width integer types are written as `iN` where N is the bit width.
+
+    | Type  | Width | Common use         |
+    |-------|-------|--------------------|
+    | `i1`  | 1-bit | Boolean conditions |
+    | `i8`  | 8-bit | Bytes, `char`      |
+    | `i16` | 16-bit | Short integers    |
+    | `i32` | 32-bit | Standard `int`    |
+    | `i64` | 64-bit | Long integers     |
+
+    LLVM integer types are unsigned by default; signedness is determined by the instruction used (e.g., `sdiv` vs `udiv`, `sext` vs `zext`).
+  </Accordion>
+  <Accordion title="Floating-point types">
+    Standard IEEE floating-point types:
+
+    - `half` — 16-bit IEEE 754 half precision
+    - `float` — 32-bit IEEE 754 single precision
+    - `double` — 64-bit IEEE 754 double precision
+    - `fp128` — 128-bit IEEE 754 quad precision
+    - `x86_fp80` — 80-bit x87 extended precision
+  </Accordion>
+  <Accordion title="Pointer type">
+    In modern LLVM (opaque pointers), all pointers are simply `ptr`. There is no element type encoded in the pointer itself. Cast and GEP instructions make the type explicit at the point of use.
+  </Accordion>
+  <Accordion title="Aggregate types">
+    - **Array**: `[N x T]` — a fixed-length sequence of N elements of type T. Example: `[13 x i8]`.
+    - **Struct**: `{ T1, T2, ... }` — a named or anonymous sequence of fields with individual types.
+    - **Vector**: `<N x T>` — a fixed-length SIMD vector of N elements of type T, used for auto-vectorization. Example: `<4 x float>`.
+  </Accordion>
+</AccordionGroup>
+
+## SSA form and phi nodes
+
+Every instruction in LLVM IR defines its result exactly once, and that result is never overwritten — this is the Static Single Assignment (SSA) property. For a value to be used it must dominate all of its uses. The verifier checks this: the following instruction is syntactically valid but not well-formed because `%x` does not dominate itself:
+
+```llvm ill-formed — %x does not dominate its own use
+%x = add i32 1, %x
+```
+
+When control flow merges, multiple definitions of a conceptual variable must be reconciled. SSA handles this with **phi nodes** (`phi` instructions). A phi node selects a value based on which predecessor basic block control arrived from:
+
+```llvm phi node — select value based on predecessor block
+define i32 @max(i32 %a, i32 %b) {
+entry:
+  %cmp = icmp sgt i32 %a, %b
+  br i1 %cmp, label %then, label %else
+
+then:
+  br label %merge
+
+else:
+  br label %merge
+
+merge:
+  ; %result is %a if we came from %then, %b if from %else
+  %result = phi i32 [ %a, %then ], [ %b, %else ]
+  ret i32 %result
+}
+```
+
+Phi nodes must appear at the very beginning of a basic block, before any non-phi instructions.
+
+## Identifiers
+
+LLVM uses two prefixes for identifiers:
+
+- `@` — global identifiers (functions, global variables)
+- `%` — local identifiers (register names, type aliases)
+
+Identifiers can be named (`%foo`, `@DivisionByZero`) or unnamed (numeric, e.g., `%12`, `@2`). Named identifiers use the pattern `[%@][-a-zA-Z$._][-a-zA-Z$._0-9]*`. Reserved words (opcodes like `add`, `ret`; types like `i32`, `void`) never start with `%` or `@`, so there are no conflicts.
+
+<Tip>
+  The full LLVM Language Reference Manual documents every instruction, type, attribute, and metadata construct in detail. See the [LLVM Language Reference Manual](https://llvm.org/docs/LangRef.html).
+</Tip>

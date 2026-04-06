@@ -1,0 +1,255 @@
+---
+title: "Testing LLVM"
+description: "A guide to the LLVM test infrastructure: lit, FileCheck, regression tests, unit tests, and how to write and run your own tests."
+---
+
+LLVM has a well-structured testing infrastructure built around two tools: **lit** (LLVM Integrated Tester) and **FileCheck**. Understanding these tools is essential both for running the existing test suite and for adding tests when you contribute new functionality.
+
+## Test infrastructure overview
+
+The LLVM testing infrastructure contains three categories of tests:
+
+<CardGroup cols={3}>
+  <Card title="Unit tests" icon="flask">
+    In `llvm/unittests/`. Written with Google Test. Target support libraries and data structures. Run with `check-llvm-unit`.
+  </Card>
+  <Card title="Regression tests" icon="bug">
+    In `llvm/test/`. Driven by lit and FileCheck. Cover IR transformations, analyses, and codegen. Run with `check-llvm`.
+  </Card>
+  <Card title="test-suite" icon="layers">
+    Separate repository. Whole programs compiled and executed. Used for benchmarking and broad correctness checks.
+  </Card>
+</CardGroup>
+
+Unit tests and regression tests live in the main `llvm-project` repository and are expected to always pass. Run them before every commit.
+
+## Running tests
+
+### Prerequisites
+
+- Python 3.8 or later (for lit)
+- A built LLVM (release mode recommended for speed)
+
+Build in release mode with assertions for the best balance of speed and diagnostic coverage:
+
+```bash
+cmake -S llvm -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_ASSERTIONS=On
+```
+
+### Running the full test suite
+
+<Tabs>
+  <Tab title="CMake / Ninja">
+    ```bash
+    # All unit + regression tests
+    cmake --build build --target check-llvm
+
+    # Unit tests only
+    cmake --build build --target check-llvm-unit
+
+    # With Clang tests too
+    cmake --build build --target check-all
+    ```
+  </Tab>
+  <Tab title="Make">
+    ```bash
+    make check-llvm
+    make check-llvm-unit
+    make check-all
+    ```
+  </Tab>
+</Tabs>
+
+### Running specific tests
+
+Use `llvm-lit` (built as part of LLVM) to run individual files or directories:
+
+```bash
+# Run a single test file
+llvm-lit llvm/test/Transforms/Utils/helloworld.ll
+
+# Run all tests in a directory
+llvm-lit llvm/test/CodeGen/ARM/
+
+# Run with verbose output
+llvm-lit -v llvm/test/Transforms/InstCombine/add.ll
+```
+
+<Note>
+Test files are in the `llvm-project` source directory, not the build directory. `llvm-lit` resolves tool paths to the built binaries automatically.
+</Note>
+
+## Unit tests with Google Test
+
+Unit tests live in `llvm/unittests/` and use the [Google Test](https://github.com/google/googletest) framework. They are best suited for testing support libraries, data structures, and small isolated components.
+
+```cpp
+// llvm/unittests/Support/SmallVectorTest.cpp (abbreviated example)
+#include "llvm/ADT/SmallVector.h"
+#include "gtest/gtest.h"
+
+using namespace llvm;
+
+TEST(SmallVectorTest, PushBack) {
+  SmallVector<int, 4> V;
+  V.push_back(1);
+  V.push_back(2);
+  EXPECT_EQ(2u, V.size());
+  EXPECT_EQ(1, V[0]);
+  EXPECT_EQ(2, V[1]);
+}
+```
+
+To add a new unit test file, add it to the appropriate `CMakeLists.txt` under `llvm/unittests/` and include it in the `add_llvm_unittest` target.
+
+<Tip>
+Unit tests are preferred for testing support library code. For testing IR transformations and analyses, regression tests with FileCheck are the standard approach.
+</Tip>
+
+## Regression tests with lit and FileCheck
+
+Regression tests are small IR or source files that exercise a specific LLVM feature. They live in `llvm/test/` and are driven by `lit`, which reads embedded `RUN:` directives to know how to execute each test.
+
+### Anatomy of a regression test
+
+```llvm
+; RUN: opt -disable-output -passes=helloworld %s 2>&1 | FileCheck %s
+
+; CHECK: {{^}}foo{{$}}
+define i32 @foo() {
+  %a = add i32 2, 3
+  ret i32 %a
+}
+
+; CHECK-NEXT: {{^}}bar{{$}}
+define void @bar() {
+  ret void
+}
+```
+
+- The `;` character is the LLVM IR comment syntax.
+- `RUN:` lines tell `lit` what command(s) to execute. `%s` is substituted with the path to the test file.
+- `CHECK:` lines are consumed by `FileCheck`, which scans the command output for matching patterns.
+
+### RUN lines
+
+Each `RUN:` line is an independent shell command. Use `\` to continue a command across lines:
+
+```llvm
+; RUN: opt -passes=mem2reg %s -S -o - | \
+; RUN:   FileCheck %s
+```
+
+`lit` substitutes tool names with full paths to the built binaries, so never hardcode paths like `/usr/bin/opt`.
+
+Redirect `2>&1` when the output you want to check goes to stderr (as with `errs()` in LLVM passes):
+
+```llvm
+; RUN: opt -passes=helloworld %s -disable-output 2>&1 | FileCheck %s
+```
+
+### Writing new regression tests
+
+<Steps>
+  <Step title="Choose the right directory">
+    Place the test under `llvm/test/` in the subdirectory that matches what you are testing. For example, `llvm/test/Transforms/Utils/` for a utility transform, or `llvm/test/CodeGen/X86/` for X86 codegen.
+  </Step>
+
+  <Step title="Write RUN lines">
+    Write one or more `RUN:` lines that invoke the relevant LLVM tool and pipe output to `FileCheck`:
+
+    ```llvm
+    ; RUN: opt -passes=my-pass -S %s | FileCheck %s
+    ```
+  </Step>
+
+  <Step title="Write FileCheck patterns">
+    Add `CHECK:` lines in the test file itself that match the expected output. FileCheck scans the output sequentially for each pattern in order.
+
+    ```llvm
+    ; CHECK-LABEL: @my_function
+    ; CHECK:       %result = add i32
+    ; CHECK-NOT:   call void @old_function
+    ```
+  </Step>
+
+  <Step title="Verify the test passes">
+    ```bash
+    llvm-lit -v llvm/test/Transforms/Utils/my-test.ll
+    ```
+  </Step>
+</Steps>
+
+## FileCheck directives
+
+FileCheck is the pattern-matching tool used in regression tests. It reads patterns from the test file and verifies them against the tool's output.
+
+| Directive | Behavior |
+|---|---|
+| `CHECK: pattern` | Match `pattern` anywhere after the previous match point |
+| `CHECK-NEXT: pattern` | Match `pattern` on the very next non-empty line after the previous match |
+| `CHECK-SAME: pattern` | Match `pattern` on the **same** line as the previous match |
+| `CHECK-NOT: pattern` | Assert that `pattern` does **not** appear between the previous and next match |
+| `CHECK-LABEL: pattern` | Match `pattern` and reset the search position; used to divide output into labeled sections |
+| `CHECK-DAG: pattern` | Match `pattern` in any order relative to other `CHECK-DAG` patterns |
+| `CHECK-EMPTY:` | Assert the next line is empty |
+| `CHECK-COUNT-N: pattern` | Match `pattern` exactly N times |
+
+### Examples
+
+```llvm
+; CHECK-LABEL: define i32 @add_func(
+; CHECK-NEXT:    %result = add i32 %a, %b
+; CHECK-NEXT:    ret i32 %result
+
+; CHECK-NOT: call void @debug_print
+
+; CHECK-DAG: store i32 1
+; CHECK-DAG: store i32 2
+```
+
+FileCheck patterns are regular expressions. Use `{{...}}` for regex groups and `[[VAR:pattern]]` to capture and reuse values:
+
+```llvm
+; CHECK: %[[REG:[a-z0-9]+]] = load i32
+; CHECK: store i32 %[[REG]]
+```
+
+## Generating test assertions automatically
+
+Writing `CHECK` lines by hand is tedious for large tests. LLVM provides scripts in `llvm/utils/` that generate assertions automatically:
+
+```bash
+# For opt-based tests
+llvm/utils/update_test_checks.py --opt-binary build/bin/opt test.ll
+
+# For llc-based codegen tests
+llvm/utils/update_llc_test_checks.py --llc-binary build/bin/llc test.ll
+
+# For Clang IR tests
+llvm/utils/update_cc_test_checks.py test.c
+```
+
+These scripts run the tool, capture the output, and insert `CHECK` lines into the test file. A `NOTE:` comment is added at the top indicating that assertions were auto-generated.
+
+<Warning>
+Auto-generated assertions are verbose and brittle; they match exact register names and instruction ordering. Prefer hand-written assertions when the test is checking a specific optimization behavior rather than full output fidelity.
+</Warning>
+
+## Testing analyses
+
+Analysis passes are tested by writing a companion "printer" pass that consumes the analysis result and prints it in a textual format suitable for FileCheck. The test then pipes the printer's output through FileCheck in the usual way.
+
+See `llvm/test/Analysis/BranchProbabilityInfo/loop.ll` for a representative example.
+
+## The lit configuration system
+
+Each directory in `llvm/test/` contains a `lit.local.cfg` (Python) that configures how `lit` finds and runs tests in that directory. When adding a new test directory, copy `lit.local.cfg` from an adjacent directory. The standard configuration simply specifies which file extensions `lit` should treat as test files.
+
+The top-level configuration is written to `build/test/lit.site.cfg.py` by CMake and provides `lit` with paths to all built LLVM tools.
+
+## Test suite coverage
+
+The full `test-suite` (separate repository at https://github.com/llvm/llvm-test-suite) contains whole programs — C, C++, and Fortran — that are compiled and executed to check output correctness and measure performance. See the [Test Suite Guide](https://llvm.org/docs/TestSuiteGuide.html) for setup and usage instructions.

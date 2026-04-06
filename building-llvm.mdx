@@ -1,0 +1,347 @@
+---
+title: "Building LLVM"
+description: "Detailed reference for configuring and building LLVM with CMake, covering build types, sub-projects, generators, and performance options."
+---
+
+## Overview
+
+LLVM uses [CMake](https://cmake.org/) as its build system generator. CMake does not build the project directly — it generates the files needed by your build tool (Ninja, GNU Make, Visual Studio, Xcode) from the source tree.
+
+The canonical build invocation is:
+
+```bash
+cmake -S llvm -B build -G <generator> [options]
+ninja -C build
+```
+
+`-S llvm` points CMake at the `llvm/` source directory within the monorepo. `-B build` places all generated files and object files in a `build/` directory separate from the source tree.
+
+<Note>
+CMake preserves option values between re-runs. You can re-configure an existing build directory by re-running `cmake -S llvm -B build` with new or changed flags — only the modified options need to be specified.
+</Note>
+
+## Build system generators
+
+CMake generates project files for a range of build tools. Choose the generator that matches your environment.
+
+<CodeGroup>
+
+```bash Ninja (recommended)
+cmake -S llvm -B build -G Ninja
+ninja -C build
+```
+
+```bash Unix Makefiles
+cmake -S llvm -B build -G "Unix Makefiles"
+make -C build -j$(nproc)
+```
+
+```bash Visual Studio 2022
+cmake -S llvm -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+```bash Xcode
+cmake -S llvm -B build -G Xcode
+xcodebuild -project build/LLVM.xcodeproj -configuration Release
+```
+
+</CodeGroup>
+
+Ninja is the preferred generator for most LLVM developers. It significantly improves build time, especially for incremental builds, and reduces memory usage compared to Make.
+
+## Enabling sub-projects
+
+Use `-DLLVM_ENABLE_PROJECTS` to build additional sub-projects alongside LLVM core. The value is a semicolon-separated list of project names.
+
+```bash
+cmake -S llvm -B build -G Ninja \
+  -DLLVM_ENABLE_PROJECTS="clang;lld"
+```
+
+Available sub-projects that can be listed in `LLVM_ENABLE_PROJECTS`:
+
+| Project | Description |
+|---|---|
+| `clang` | C/C++/Objective-C frontend |
+| `clang-tools-extra` | clang-tidy, clangd, and other Clang-based tools |
+| `lld` | LLVM linker |
+| `lldb` | LLVM debugger |
+| `polly` | Polyhedral loop optimizer |
+| `cross-project-tests` | Tests that span multiple sub-projects |
+
+Runtime libraries (libc++, compiler-rt, etc.) are enabled separately with `-DLLVM_ENABLE_RUNTIMES`:
+
+```bash
+cmake -S llvm -B build -G Ninja \
+  -DLLVM_ENABLE_PROJECTS="clang" \
+  -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;compiler-rt"
+```
+
+## Build type
+
+`-DCMAKE_BUILD_TYPE` controls the optimization level and debug information included in the build. This is one of the most important options to set correctly for your use case.
+
+<Tabs>
+  <Tab title="Debug">
+    Unoptimized build with full debug information and assertion checks enabled. This is the default when no build type is specified.
+
+    ```bash
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Debug
+    ```
+
+    Use this when developing or debugging passes, frontends, or the code generator. Expect significantly larger binaries and longer build times (1–3 GB for LLVM alone, 15–20 GB for LLVM + Clang).
+  </Tab>
+  <Tab title="Release">
+    Fully optimized build (`-O3`) with no debug information and assertions disabled. Use this for production installs or performance benchmarking.
+
+    ```bash
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release
+    ```
+
+    Requires considerably less disk space than a debug build.
+  </Tab>
+  <Tab title="RelWithDebInfo">
+    Optimized build (`-O2`) that retains debug information. Useful when you need to debug an issue that only reproduces in an optimized build.
+
+    ```bash
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    ```
+  </Tab>
+  <Tab title="MinSizeRel">
+    Size-optimized build (`-Os`). Produces smaller binaries at the cost of some performance.
+
+    ```bash
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=MinSizeRel
+    ```
+  </Tab>
+</Tabs>
+
+## Common CMake options
+
+### Target architectures
+
+By default, LLVM builds backends for all supported target architectures. To reduce build time and binary size, restrict the build to only the targets you need:
+
+```bash
+-DLLVM_TARGETS_TO_BUILD="X86"
+```
+
+Specify multiple targets separated by semicolons:
+
+```bash
+-DLLVM_TARGETS_TO_BUILD="X86;AArch64;RISCV;AMDGPU"
+```
+
+A full list of targets is in [`llvm/lib/Target/`](https://github.com/llvm/llvm-project/tree/main/llvm/lib/Target) in the monorepo.
+
+### Install prefix
+
+Set the installation directory for tools, libraries, and headers:
+
+```bash
+-DCMAKE_INSTALL_PREFIX=/usr/local/llvm
+```
+
+The default prefix is `/usr/local`. After building, run `ninja -C build install` to install.
+
+### Assertions
+
+```bash
+-DLLVM_ENABLE_ASSERTIONS=ON
+```
+
+Assertions are enabled by default in `Debug` builds and disabled by default in all other build types. Enabling assertions in a `Release` build can be a useful middle ground — you get optimized performance with runtime checks.
+
+### Linker
+
+Using `lld` as the linker can dramatically reduce link times on Linux and Windows:
+
+```bash
+-DLLVM_USE_LINKER=lld
+```
+
+Requires `lld` to already be installed on the system. If `lld` is not available, `gold` is a faster alternative to GNU `ld` on Linux.
+
+### Parallel link jobs
+
+Linking LLVM can consume several gigabytes of RAM per parallel job. Limit the number of concurrent link processes to avoid out-of-memory errors:
+
+```bash
+-DLLVM_PARALLEL_LINK_JOBS=2
+```
+
+Set to `1` on systems with limited memory. Similarly, compile and TableGen jobs can be limited:
+
+```bash
+-DLLVM_PARALLEL_COMPILE_JOBS=8
+-DLLVM_PARALLEL_TABLEGEN_JOBS=4
+```
+
+### Optimized TableGen
+
+Generate a fully optimized `TableGen` compiler even in `Debug` builds. This significantly reduces build time because TableGen is invoked many times during the build:
+
+```bash
+-DLLVM_OPTIMIZED_TABLEGEN=ON
+```
+
+Do not set this if you intend to debug the TableGen compiler itself.
+
+### Shared libraries
+
+Build shared libraries instead of static libraries. This reduces memory pressure on the linker and speeds up linking, but is intended for development only — not production distribution:
+
+```bash
+-DBUILD_SHARED_LIBS=ON
+```
+
+For a single shared `libLLVM` suitable for distribution, use:
+
+```bash
+-DLLVM_BUILD_LLVM_DYLIB=ON
+-DLLVM_LINK_LLVM_DYLIB=ON
+```
+
+### Split DWARF
+
+On ELF platforms (Linux), split DWARF stores debug information in separate `.dwo` files instead of embedding it in binaries. This substantially reduces linker memory usage and speeds up incremental builds:
+
+```bash
+-DLLVM_USE_SPLIT_DWARF=ON
+```
+
+Only applicable to `Debug` and `RelWithDebInfo` builds on Linux.
+
+### Compiler selection
+
+Override the C and C++ compilers used to build LLVM:
+
+```bash
+-DCMAKE_C_COMPILER=clang \
+-DCMAKE_CXX_COMPILER=clang++
+```
+
+### Python interpreter
+
+If you have multiple Python installations, specify which one to use:
+
+```bash
+-DPython3_EXECUTABLE=/usr/bin/python3
+```
+
+## Platform-specific builds
+
+<Tabs>
+  <Tab title="Linux">
+    A typical developer configuration on Linux that enables Clang, uses `lld` for faster linking, limits link parallelism, and restricts the build to the host architecture:
+
+    ```bash
+    cmake -S llvm -B build \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DLLVM_ENABLE_PROJECTS="clang;lld" \
+      -DLLVM_TARGETS_TO_BUILD="X86" \
+      -DLLVM_USE_LINKER=lld \
+      -DLLVM_PARALLEL_LINK_JOBS=2 \
+      -DLLVM_OPTIMIZED_TABLEGEN=ON \
+      -DLLVM_ENABLE_ASSERTIONS=ON
+
+    ninja -C build
+    ```
+  </Tab>
+  <Tab title="macOS">
+    On macOS, Xcode's Apple Clang is the default host compiler. A typical developer configuration:
+
+    ```bash
+    cmake -S llvm -B build \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DLLVM_ENABLE_PROJECTS="clang" \
+      -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
+      -DLLVM_OPTIMIZED_TABLEGEN=ON \
+      -DLLVM_ENABLE_ASSERTIONS=ON
+
+    ninja -C build
+    ```
+  </Tab>
+  <Tab title="Windows">
+    On Windows, run all commands in a **Developer Command Prompt for VS 2019** (or later). Use the Visual Studio generator or Ninja with the MSVC toolchain:
+
+    ```bat
+    cmake -S llvm -B build ^
+      -G "Visual Studio 17 2022" -A x64 ^
+      -DCMAKE_BUILD_TYPE=Release ^
+      -DLLVM_ENABLE_PROJECTS="clang;lld" ^
+      -DLLVM_TARGETS_TO_BUILD="X86;AArch64"
+
+    cmake --build build --config Release
+    ```
+
+    LLVM fully supports the COFF object file format, which is compatible with all other Windows toolchains.
+  </Tab>
+</Tabs>
+
+## Build targets
+
+CMake generates named build targets for each tool, library, and sub-project. Common targets:
+
+| Target | Description |
+|---|---|
+| *(default)* | Build all of LLVM and enabled sub-projects |
+| `check-llvm` | Run LLVM regression tests |
+| `check-clang` | Run Clang regression tests |
+| `check-all` | Run all regression tests for enabled sub-projects |
+| `install` | Install to `CMAKE_INSTALL_PREFIX` |
+| `docs-llvm-html` | Build HTML docs (requires `-DLLVM_ENABLE_SPHINX=ON`) |
+
+Run a specific target with Ninja:
+
+```bash
+ninja -C build check-llvm
+ninja -C build install
+```
+
+## Advanced: bootstrap builds
+
+A bootstrap build compiles Clang using the system compiler, then uses that just-built Clang to compile Clang again. This is used to validate that Clang can compile itself and to produce a self-hosting compiler. Bootstrap builds use CMake cache scripts in `clang/cmake/caches/`:
+
+```bash
+cmake -S llvm -B build \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCLANG_ENABLE_BOOTSTRAP=ON \
+  -DLLVM_ENABLE_PROJECTS="clang"
+
+ninja -C build stage2
+```
+
+For more complex multi-stage builds and PGO (Profile-Guided Optimization) builds, pass a CMake cache file using the `-C` flag:
+
+```bash
+cmake -S llvm -B build \
+  -G Ninja \
+  -C clang/cmake/caches/PGO.cmake
+```
+
+Cache files for common configurations (PGO, BOLT, distribution builds) are located in `clang/cmake/caches/` within the monorepo.
+
+## Stand-alone sub-project builds
+
+If you already have LLVM installed, you can build a sub-project (such as Clang) against the installed libraries without rebuilding LLVM from source:
+
+```bash
+cmake -G Ninja \
+  -S path/to/llvm-project/clang \
+  -B build-clang \
+  -DLLVM_EXTERNAL_LIT=/path/to/lit \
+  -DLLVM_ROOT=/path/to/llvm/install/prefix
+
+ninja -C build-clang
+```
+
+`LLVM_ROOT` must point to the install prefix of the LLVM installation (e.g., `/usr/local` if the tools are in `/usr/local/bin`). `LLVM_EXTERNAL_LIT` is required to run tests.

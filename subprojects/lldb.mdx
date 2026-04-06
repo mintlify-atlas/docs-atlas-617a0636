@@ -1,0 +1,252 @@
+---
+title: "LLDB"
+description: "A modern, high-performance debugger built on Clang and LLVM libraries, with a structured command interface, Python scripting, and broad IDE integration."
+---
+
+LLDB is the debugger in the LLVM project. It uses Clang for expression evaluation and type information, and LLVM for disassembly. LLDB supports C, C++, Objective-C, Objective-C++, and Swift on macOS, Linux, FreeBSD, and Windows.
+
+## Starting a debug session
+
+<Tabs>
+  <Tab title="Debug an executable">
+    ```bash
+    lldb ./my-program
+    ```
+
+    LLDB loads the binary and waits for you to set breakpoints before running:
+
+    ```
+    (lldb) target create "./my-program"
+    Current executable set to './my-program' (x86_64).
+    (lldb)
+    ```
+  </Tab>
+  <Tab title="Attach to a running process">
+    ```bash
+    # Attach by PID
+    lldb -p 12345
+
+    # Or attach from within LLDB
+    lldb
+    (lldb) process attach --pid 12345
+
+    # Attach by process name
+    (lldb) process attach --name my-program
+
+    # Wait for the process to launch, then attach
+    (lldb) process attach --name my-program --waitfor
+    ```
+  </Tab>
+  <Tab title="Specify the program after launch">
+    ```
+    $ lldb
+    (lldb) file ./my-program
+    Current executable set to './my-program' (x86_64).
+    ```
+  </Tab>
+</Tabs>
+
+## Example debugging session
+
+```
+$ lldb ./my-program
+
+(lldb) breakpoint set --file main.cpp --line 42
+Breakpoint 1: where = my-program`main + 33 at main.cpp:42, address = 0x0000000100001234
+
+(lldb) run
+Process 46912 launched: './my-program' (x86_64)
+Process 46912 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x0000000100001234 my-program`main at main.cpp:42
+
+(lldb) frame variable
+(int) argc = 1
+(const char **) argv = 0x00007ffeefbff880
+
+(lldb) next
+(lldb) step
+(lldb) thread backtrace
+* thread #1, stop reason = step in
+  frame #0: main.cpp:45
+  frame #1: my-program`start + 52
+
+(lldb) continue
+Process 46912 resuming
+Process 46912 exited with status = 0
+```
+
+## Key commands
+
+### Breakpoints
+
+```
+# Break at a file and line
+(lldb) breakpoint set --file foo.cpp --line 12
+(lldb) br s -f foo.cpp -l 12
+
+# Break at a function by name
+(lldb) breakpoint set --name foo
+(lldb) br s -n foo
+
+# Break on all C++ methods named "process"
+(lldb) breakpoint set --method process
+
+# Break on an Objective-C selector
+(lldb) breakpoint set --selector viewDidLoad:
+
+# List all breakpoints
+(lldb) breakpoint list
+
+# Delete breakpoint 1
+(lldb) breakpoint delete 1
+```
+
+### Execution control
+
+```
+# Run the program
+(lldb) run
+(lldb) r
+
+# Continue after a stop
+(lldb) continue
+(lldb) c
+
+# Step over the current line (does not enter function calls)
+(lldb) next
+(lldb) n
+
+# Step into a function call
+(lldb) step
+(lldb) s
+
+# Step out of the current function
+(lldb) thread step-out
+(lldb) finish
+
+# Run until a specific line in the current frame
+(lldb) thread until 100
+```
+
+### Inspecting state
+
+```
+# Show all threads
+(lldb) thread list
+
+# Backtrace for the current thread
+(lldb) thread backtrace
+(lldb) bt
+
+# Backtrace for all threads
+(lldb) thread backtrace all
+
+# Show local variables in the current frame
+(lldb) frame variable
+
+# Show a specific variable
+(lldb) frame variable self
+
+# Evaluate an expression
+(lldb) expression 2 + 2
+(lldb) p my_variable
+
+# Select a different stack frame
+(lldb) frame select 2
+
+# Move up/down the stack
+(lldb) up
+(lldb) down
+```
+
+### Watchpoints
+
+```
+# Watch a variable for writes
+(lldb) watch set var global
+
+# Watch with a condition
+(lldb) watch set var global
+(lldb) watch modify -c '(global == 5)'
+
+# List watchpoints
+(lldb) watch list
+```
+
+## Python scripting
+
+LLDB embeds a Python interpreter accessible via the `script` command. The full LLDB API is available as Python classes, enabling complex automation that would be difficult to express as command sequences.
+
+```
+(lldb) script
+>>> import lldb
+>>> target = lldb.debugger.GetSelectedTarget()
+>>> print(target.GetNumBreakpoints())
+```
+
+You can load external Python scripts with `command script import`:
+
+```
+(lldb) command script import ~/lldb_scripts/my_commands.py
+```
+
+An example script that prints all frames in all threads:
+
+```python
+import lldb
+
+def print_all_frames(debugger, command, result, internal_dict):
+    target = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    for thread in process:
+        print(f"Thread {thread.GetIndexID()}: {thread.GetStopDescription(80)}")
+        for frame in thread:
+            print(f"  frame #{frame.GetFrameID()}: {frame}")
+
+def __lldb_init_module(debugger, internal_dict):
+    debugger.HandleCommand(
+        "command script add -f my_commands.print_all_frames frames"
+    )
+```
+
+<Tip>
+  Store commonly used aliases and startup commands in `~/.lldbinit`. LLDB reads this file at startup.
+</Tip>
+
+## IDE integration
+
+<CardGroup cols={2}>
+  <Card title="Xcode" icon="apple">
+    Xcode uses LLDB as its built-in debugger. All debugging in Xcode (breakpoints, variable inspector, console) runs through the LLDB engine automatically.
+  </Card>
+  <Card title="VS Code" icon="code">
+    Install the **CodeLLDB** extension (`vadimcn.vscode-codelldb`) for full LLDB integration including conditional breakpoints, the watch window, and the debug console.
+  </Card>
+  <Card title="Emacs / Vim" icon="terminal">
+    LLDB ships `lldb-vscode` (also known as `lldb-dap`), a Debug Adapter Protocol server. Any editor with a DAP client can connect to it for a full debugging experience.
+  </Card>
+  <Card title="lldb-dap" icon="plug">
+    `lldb-dap` is the Debug Adapter Protocol implementation in LLDB. It enables integration with any DAP-compatible editor, including VS Code, Emacs with `dap-mode`, and Neovim with `nvim-dap`.
+  </Card>
+</CardGroup>
+
+## Command aliases and customization
+
+LLDB supports command abbreviation by shortest unique prefix. It also provides full alias creation:
+
+```
+# Create an alias for a breakpoint command
+(lldb) command alias bfl breakpoint set -f %1 -l %2
+(lldb) bfl main.cpp 42
+
+# Remove a built-in alias
+(lldb) command unalias b
+
+# Redefine b to the full breakpoint command
+(lldb) command alias b breakpoint
+```
+
+<Note>
+  LLDB commands follow the form `<noun> <verb> [options] [arguments]`. This structured syntax allows consistent tab completion across all commands, where options specific to each noun/verb combination are completed in context.
+</Note>

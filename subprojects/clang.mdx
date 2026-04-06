@@ -1,0 +1,191 @@
+---
+title: "Clang"
+description: "A compiler frontend for C, C++, Objective-C, and Objective-C++ built on the LLVM infrastructure, with best-in-class diagnostics and rich library APIs for source-level tooling."
+---
+
+Clang is the C-family language frontend in the LLVM project. It supports C (K&R through C23), C++ (C++98 through C++26), Objective-C, Objective-C++, OpenCL C, and HIP. Clang is designed to be GCC-compatible, provide high-quality diagnostics, and serve as a reusable library for source analysis tools.
+
+## Using Clang as a compiler
+
+Clang ships three driver frontends:
+
+| Binary | Purpose |
+|--------|---------|
+| `clang` | C compiler |
+| `clang++` | C++ compiler |
+| `clang-cl` | MSVC-compatible driver (`cl.exe` replacement) |
+
+<Steps>
+  <Step title="Compile a C++ source file">
+    ```bash
+    clang++ -std=c++17 -O2 -o hello hello.cpp
+    ```
+  </Step>
+  <Step title="Compile with debug information">
+    ```bash
+    clang++ -std=c++20 -g -O0 -o app main.cpp
+    ```
+  </Step>
+  <Step title="Enable warnings and sanitizers">
+    ```bash
+    clang++ -std=c++17 -Wall -Wextra -fsanitize=address -g -o app main.cpp
+    ```
+  </Step>
+</Steps>
+
+## Common command-line flags
+
+<CardGroup cols={2}>
+  <Card title="Optimization levels" icon="gauge">
+    `-O0` disables optimization (default for debug builds). `-O1`, `-O2`, and `-O3` enable progressively more aggressive optimization. `-Os` optimizes for code size.
+  </Card>
+  <Card title="Language standard" icon="book">
+    `-std=c++17`, `-std=c++20`, `-std=c++23`, `-std=c11`, `-std=c17`. Clang also accepts `-std=gnu++17` for GNU extensions.
+  </Card>
+  <Card title="Debug info" icon="bug">
+    `-g` emits DWARF debug information. Combine with `-O0` for the most debuggable output.
+  </Card>
+  <Card title="Sanitizers" icon="shield">
+    `-fsanitize=address` (AddressSanitizer), `-fsanitize=undefined` (UBSan), `-fsanitize=thread` (ThreadSanitizer), `-fsanitize=memory` (MemorySanitizer).
+  </Card>
+</CardGroup>
+
+```bash
+# Compile C++ with warnings treated as errors
+clang++ -std=c++20 -Wall -Wextra -Werror -O2 -o app main.cpp
+
+# Cross-compile for AArch64
+clang++ --target=aarch64-linux-gnu -std=c++17 -O2 -o app main.cpp
+
+# Use the MSVC-compatible driver on Windows
+clang-cl /std:c++17 /O2 /W3 main.cpp /Fe:app.exe
+```
+
+## Emitting LLVM IR
+
+Clang can stop compilation at the LLVM IR stage, which is useful for inspecting what the compiler generates or feeding IR into other LLVM tools.
+
+<Tabs>
+  <Tab title="Human-readable IR">
+    ```bash
+    # Emit LLVM IR in text form (.ll file)
+    clang++ -std=c++17 -O2 -S -emit-llvm -o output.ll input.cpp
+    ```
+  </Tab>
+  <Tab title="Bitcode">
+    ```bash
+    # Emit LLVM bitcode (.bc file)
+    clang++ -std=c++17 -O2 -c -emit-llvm -o output.bc input.cpp
+    ```
+  </Tab>
+  <Tab title="Object file (default)">
+    ```bash
+    # Emit a native object file
+    clang++ -std=c++17 -O2 -c -o output.o input.cpp
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The `-S` flag stops after compilation (before assembly). Combined with `-emit-llvm` it writes LLVM IR text instead of assembly. The `-c` flag stops after producing an object file; combined with `-emit-llvm` it writes a bitcode file.
+</Note>
+
+You can then inspect or optimize the IR:
+
+```bash
+# View IR then optimize with opt
+clang++ -O0 -S -emit-llvm -o before.ll input.cpp
+opt -O2 -S -o after.ll before.ll
+```
+
+## Clang as a library
+
+Clang exposes its internals through several library APIs for building source-level tools.
+
+### libclang
+
+`libclang` is a stable C API for parsing translation units, traversing the AST, and querying type information. It is the interface used by many editors and IDE plugins.
+
+```cpp
+#include <clang-c/Index.h>
+#include <stdio.h>
+
+int main(int argc, char *argv[]) {
+  CXIndex index = clang_createIndex(0, 0);
+  CXTranslationUnit tu = clang_parseTranslationUnit(
+      index, argv[1], NULL, 0, NULL, 0, CXTranslationUnit_None);
+
+  CXCursor cursor = clang_getTranslationUnitCursor(tu);
+  // Traverse the AST with clang_visitChildren(cursor, visitor, NULL);
+
+  clang_disposeTranslationUnit(tu);
+  clang_disposeIndex(index);
+  return 0;
+}
+```
+
+### LibTooling
+
+LibTooling is a C++ API for writing standalone tools that run `FrontendAction`s over source files. It reads a `compile_commands.json` compilation database and is used to build tools like `clang-tidy` and `clang-format`.
+
+```cpp
+#include "clang/Frontend/FrontendActions.h"
+#include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/Tooling/Tooling.h"
+#include "llvm/Support/CommandLine.h"
+
+using namespace clang::tooling;
+using namespace llvm;
+
+static cl::OptionCategory MyToolCategory("my-tool options");
+
+int main(int argc, const char **argv) {
+  auto ExpectedParser =
+      CommonOptionsParser::create(argc, argv, MyToolCategory);
+  if (!ExpectedParser) {
+    llvm::errs() << toString(ExpectedParser.takeError());
+    return 1;
+  }
+  CommonOptionsParser &OptionsParser = ExpectedParser.get();
+  ClangTool Tool(OptionsParser.getCompilations(),
+                 OptionsParser.getSourcePathList());
+  return Tool.run(
+      newFrontendActionFactory<clang::SyntaxOnlyAction>().get());
+}
+```
+
+Generate a `compile_commands.json` from your build system so LibTooling-based tools can locate headers and flags:
+
+```bash
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON /path/to/source
+```
+
+### LibASTMatchers
+
+LibASTMatchers provides a declarative pattern-matching API for the Clang AST. You describe a pattern using composable matchers, and the framework calls a callback for each match.
+
+```cpp
+#include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/ASTMatchers/ASTMatchers.h"
+
+using namespace clang::ast_matchers;
+
+// Match all calls to memcpy
+auto Matcher = callExpr(callee(functionDecl(hasName("memcpy"))));
+```
+
+## Clang Static Analyzer
+
+The Clang Static Analyzer performs path-sensitive, inter-procedural analysis to find bugs in C, C++, and Objective-C programs without running the code.
+
+```bash
+# Run the static analyzer via scan-build
+scan-build clang++ -std=c++17 -O0 main.cpp
+
+# Or use clang --analyze directly
+clang --analyze -Xanalyzer -analyzer-output=html -o report/ main.cpp
+```
+
+<Tip>
+  Use `-fsanitize=address` at runtime and the static analyzer at review time for complementary coverage — the analyzer finds logic bugs at compile time, AddressSanitizer finds memory errors at run time.
+</Tip>

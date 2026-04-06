@@ -1,0 +1,232 @@
+---
+title: "Extending LLVM"
+description: "How to add new intrinsics, optimization passes, targets, and tools to LLVM, including the plugin system and LibTooling."
+---
+
+LLVM is designed as a collection of reusable libraries with well-defined extension points. You can add new functionality — from a single intrinsic function to an entirely new target — without forking or patching the core.
+
+Before investing significant effort in an extension, consider asking on the [LLVM forums](https://discourse.llvm.org). Someone may have already implemented what you need, or there may be a simpler approach using existing infrastructure.
+
+<Warning>
+Extending LLVM at the IR level (new instructions or types) changes the bitcode format and breaks compatibility with existing installations. Start with an intrinsic function whenever possible — it is far easier and transparent to optimization passes.
+</Warning>
+
+## LLVM's extensibility philosophy
+
+LLVM is built as a set of libraries rather than a monolithic compiler. Each component — the IR, analyses, transforms, backends, and tools — is independently linkable and replaceable. This design enables several extension patterns:
+
+- **Intrinsic functions**: add new primitive operations without changing the IR instruction set.
+- **Pass plugins**: add new analyses and transforms that load dynamically into `opt` or `clang`.
+- **New targets**: add a new `lib/Target/` directory and hook into the code generation pipeline.
+- **LibTooling**: build standalone tools that process C/C++ source using Clang's AST.
+
+## Adding a new intrinsic function
+
+Intrinsics are the preferred extension mechanism for new operations. They appear as function calls in LLVM IR (named `llvm.*`) and are opaque to passes that do not know about them, which means you only need to update the passes you care about.
+
+<Steps>
+  <Step title="Document the intrinsic in LangRef">
+    Add a specification to `llvm/docs/LangRef.rst`. Describe the semantics, arguments, return type, and any restrictions. Decide whether it is target-specific or generic.
+  </Step>
+
+  <Step title="Add the TableGen definition">
+    Add an entry to the appropriate `llvm/include/llvm/IR/Intrinsics*.td` file:
+
+    ```tablegen
+    // A simple memory-access intrinsic
+    def int_my_intrinsic : Intrinsic<
+        [llvm_i32_ty],          // return type(s)
+        [llvm_ptr_ty, llvm_i32_ty], // argument types
+        [IntrReadMem, IntrArgMemOnly]  // memory access properties
+    >;
+    ```
+
+    The memory access attributes (`IntrReadMem`, `IntrWriteMem`, `IntrArgMemOnly`, etc.) control whether DCE, CSE, and alias analysis can see through the intrinsic. Any argument that must be an immediate should be marked with `ImmArg`. Overloaded intrinsics (those using `llvm_any*_ty`) get a type suffix appended to their name automatically.
+  </Step>
+
+  <Step title="Add constant folding (optional)">
+    If your intrinsic can be evaluated at compile time, add cases for it in `llvm/lib/Analysis/ConstantFolding.cpp` in both `canConstantFoldCallTo` and `ConstantFoldCall`.
+  </Step>
+
+  <Step title="Add target code generation support">
+    In `lib/Target/*/XXXInstrInfo.td`, add a pattern that matches your intrinsic and maps it to a target instruction:
+
+    ```tablegen
+    def : Pat<(int_my_intrinsic GPR:$ptr, GPR:$val),
+              (MY_TARGET_INSTR GPR:$ptr, GPR:$val)>;
+    ```
+
+    There are many examples in the PowerPC and X86 backends to follow.
+  </Step>
+
+  <Step title="Write tests">
+    Add test cases under `llvm/test/` that verify the intrinsic is correctly recognized, optimized, and lowered by each target you support.
+  </Step>
+</Steps>
+
+## Adding a new SelectionDAG node
+
+SelectionDAG nodes are used to represent target-independent operations during code generation, bridging LLVM IR and target instructions. Adding a new node is more involved than adding an intrinsic, but less disruptive than a new IR instruction.
+
+The files to modify are:
+
+| File | Change |
+|---|---|
+| `include/llvm/CodeGen/ISDOpcodes.h` | Add an enum value for the new node |
+| `lib/CodeGen/SelectionDAG/SelectionDAGDumper.cpp` | Add a name string in `getOperationName` |
+| `lib/CodeGen/SelectionDAG/LegalizeDAG.cpp` | Add legalization, promotion, and expansion cases |
+| `lib/CodeGen/SelectionDAG/DAGCombiner.cpp` | Add a combine/peephole visitor if applicable |
+| `lib/Target/*/XXXISelLowering.cpp` | Declare whether your target supports the node or needs to expand/promote it |
+| `include/llvm/Target/TargetSelectionDAG.td` | Add a `def` for the node with type constraints |
+| `lib/Target/*/XXXInstrInfo.td` | Add a pattern for targets that support the node natively |
+
+## Adding a new IR instruction
+
+<Warning>
+Adding a new instruction modifies the bitcode format. All existing bitcode readers and writers must be updated. Only add a new instruction if no existing instruction or intrinsic can express the semantics.
+</Warning>
+
+The files that must be modified:
+
+1. `llvm/include/llvm/IR/Instruction.def` — add enum name and opcode number
+2. `llvm/include/llvm/IR/Instructions.h` — declare the instruction class
+3. `llvm/include/llvm/IR/InstVisitor.h` — add a visitor prototype
+4. `llvm/lib/AsmParser/LLLexer.cpp` — add a token to parse the instruction
+5. `llvm/lib/AsmParser/LLParser.cpp` — add grammar rules for parsing
+6. `llvm/lib/Bitcode/Reader/BitcodeReader.cpp` — add a decode case
+7. `llvm/lib/Bitcode/Writer/BitcodeWriter.cpp` — add an encode case
+8. `llvm/lib/IR/Instruction.cpp` — add printing logic
+9. `llvm/lib/IR/Instructions.cpp` — implement the class
+10. `llvm/lib/Target/*/` — add lowering support in each target, or add a lowering pass
+11. `llvm/test/` — add test cases
+
+You must also update any analyses or transforms that need to understand the new instruction.
+
+## Adding new optimization passes
+
+New passes can be added in-tree or as out-of-tree plugins. For in-tree passes, see [Writing an LLVM Pass](/guides/writing-a-pass). For out-of-tree plugins, use the pass plugin mechanism:
+
+```cmake
+# CMakeLists.txt alongside llvm-project/
+add_llvm_pass_plugin(MyPassName source.cpp)
+```
+
+Set `LLVM_MYPASSNAME_LINK_INTO_TOOLS=ON` to link the plugin statically into tools; leave it off (the default) for a dynamic shared library.
+
+The plugin must provide entry points for the new pass manager:
+
+```cpp
+llvm::PassPluginLibraryInfo getMyPassPluginInfo() {
+  return {LLVM_PLUGIN_API_VERSION, "MyPass", LLVM_VERSION_STRING,
+          [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name, FunctionPassManager &FPM, ...) {
+                  if (Name == "my-pass") {
+                    FPM.addPass(MyPass());
+                    return true;
+                  }
+                  return false;
+                });
+          }};
+}
+
+extern "C" LLVM_ATTRIBUTE_WEAK llvm::PassPluginLibraryInfo
+llvmGetPassPluginInfo() {
+  return getMyPassPluginInfo();
+}
+```
+
+Load the plugin at the command line:
+
+```bash
+opt -load-pass-plugin=./MyPass.so -passes=my-pass input.ll -o output.ll
+clang -fpass-plugin=./MyPass.so -O2 source.c -o program
+```
+
+## Adding a new target
+
+A new backend lives in `llvm/lib/Target/<TargetName>/`. The implementation requires subclassing `LLVMTargetMachine`, `TargetRegisterInfo`, `TargetInstrInfo`, `TargetLowering`, and `AsmPrinter`, plus TableGen `.td` files for registers, instructions, and calling conventions.
+
+See [Writing an LLVM Backend](/guides/writing-a-backend) for the full step-by-step process.
+
+## Using the LLVM plugin system
+
+LLVM provides two plugin loading flags for `opt` and other tools:
+
+<Tabs>
+  <Tab title="-load-pass-plugin (NPM)">
+    For new pass manager plugins. Registers passes into `PassBuilder` and makes them available by name to `-passes=`:
+
+    ```bash
+    opt -load-pass-plugin=./MyPlugin.so -passes="my-pass" input.ll
+    ```
+  </Tab>
+  <Tab title="-load (legacy)">
+    For legacy pass manager plugins. Loads a shared library and calls `llvmGetPassPluginInfo` if present:
+
+    ```bash
+    opt -load=./MyPlugin.so -my-pass input.ll
+    ```
+  </Tab>
+</Tabs>
+
+To load a plugin programmatically and register its callbacks with `PassBuilder`:
+
+```cpp
+// Dynamic loading
+auto Plugin = PassPlugin::Load(PathToPlugin);
+if (!Plugin)
+  report_error();
+Plugin.registerPassBuilderCallbacks(PB);
+
+// Static linking (generated via Extension.def)
+#define HANDLE_EXTENSION(Ext) get##Ext##PluginInfo().RegisterPassBuilderCallbacks(PB);
+#include "llvm/Support/Extension.def"
+```
+
+## Writing clang tools with LibTooling
+
+LibTooling provides an API for building standalone tools that operate on C/C++ source using the full Clang frontend. A LibTooling tool parses source files into a Clang AST and runs `ASTConsumer` or `RecursiveASTVisitor` callbacks over them.
+
+A minimal tool looks like:
+
+```cpp
+#include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/Tooling/Tooling.h"
+#include "clang/ASTMatchers/ASTMatchers.h"
+#include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "llvm/Support/CommandLine.h"
+
+using namespace clang;
+using namespace clang::tooling;
+using namespace clang::ast_matchers;
+
+static llvm::cl::OptionCategory MyToolCategory("my-tool options");
+
+class MyCallback : public MatchFinder::MatchCallback {
+public:
+  void run(const MatchFinder::MatchResult &Result) override {
+    if (const auto *F = Result.Nodes.getNodeAs<FunctionDecl>("fn"))
+      llvm::outs() << "Found function: " << F->getName() << "\n";
+  }
+};
+
+int main(int argc, const char **argv) {
+  auto ExpectedParser =
+      CommonOptionsParser::create(argc, argv, MyToolCategory);
+  if (!ExpectedParser) {
+    llvm::errs() << ExpectedParser.takeError();
+    return 1;
+  }
+  CommonOptionsParser &OptionsParser = ExpectedParser.get();
+  ClangTool Tool(OptionsParser.getCompilations(),
+                 OptionsParser.getSourcePathList());
+
+  MyCallback Callback;
+  MatchFinder Finder;
+  Finder.addMatcher(functionDecl().bind("fn"), &Callback);
+  return Tool.run(newFrontendActionFactory(&Finder).get());
+}
+```
+
+Build against `clangTooling`, `clangASTMatchers`, and `clangBasic`. The tool can be run on any compilation database (e.g., generated by CMake with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`).

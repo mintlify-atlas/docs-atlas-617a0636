@@ -1,0 +1,336 @@
+---
+title: "Clang Tools"
+description: "An overview of clang-tidy, clang-format, clangd, and other tools from the clang-tools-extra repository."
+---
+
+The `clang-tools-extra` repository contains a collection of tools built on top of the Clang compiler infrastructure. These tools share a common foundation: they parse real C++ code using Clang's AST and understand your build system through `compile_commands.json`.
+
+<CardGroup cols={2}>
+  <Card title="clang-tidy" icon="shield-check">
+    Linter and static analysis tool with hundreds of configurable checks.
+  </Card>
+  <Card title="clang-format" icon="align-left">
+    Automatic code formatter with support for multiple style presets.
+  </Card>
+  <Card title="clangd" icon="server">
+    Language server providing IDE features over the Language Server Protocol.
+  </Card>
+  <Card title="clang-doc" icon="book">
+    Documentation generator that produces HTML or Markdown from C++ source.
+  </Card>
+</CardGroup>
+
+## compile_commands.json
+
+Most clang-based tools need to know how to compile each file in your project — the include paths, macro definitions, and language standards in use. This information is provided via a `compile_commands.json` compilation database.
+
+**Generating with CMake:**
+
+```bash
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <source-dir>
+```
+
+CMake writes `compile_commands.json` to your build directory. You can symlink it to your project root so tools can find it automatically:
+
+```bash
+ln -s build/compile_commands.json compile_commands.json
+```
+
+**Generating with Bear (for Make-based projects):**
+
+```bash
+bear -- make
+```
+
+This intercepts compiler invocations and produces `compile_commands.json` in the current directory.
+
+<Note>
+When `compile_commands.json` is present, you do not need to pass `-I` or `-D` flags manually on the command line. The tool reads the correct flags for each file from the database.
+</Note>
+
+---
+
+## clang-tidy
+
+`clang-tidy` is a Clang-based linter that performs static analysis and enforces coding guidelines. It ships with over 400 checks organized into named groups.
+
+### Running clang-tidy
+
+```bash
+# Analyze a single file (compile_commands.json auto-detected)
+clang-tidy file.cpp
+
+# Pass compile flags manually (no compile_commands.json needed)
+clang-tidy file.cpp -- -std=c++17 -Iinclude/
+
+# Run only modernize and bugprone checks
+clang-tidy -checks="-*,modernize-*,bugprone-*" file.cpp
+
+# Apply auto-fixes where available
+clang-tidy -checks="modernize-use-nullptr" --fix file.cpp
+
+# List all checks that would run
+clang-tidy -list-checks
+```
+
+### Check groups
+
+| Prefix | Description |
+|--------|-------------|
+| `bugprone-` | Bug-prone code constructs (e.g. easily-swapped arguments, suspicious string operations). |
+| `modernize-` | Suggests modern C++ idioms (use `nullptr`, range-based for loops, `override`, etc.). |
+| `performance-` | Performance-related issues (unnecessary copies, inefficient containers, etc.). |
+| `readability-` | Code clarity improvements (naming, redundant expressions, etc.). |
+| `clang-analyzer-` | Clang Static Analyzer checks (path-sensitive analysis for memory and threading bugs). |
+| `cppcoreguidelines-` | Checks aligned with the C++ Core Guidelines. |
+| `google-` | Google C++ Style Guide checks. |
+| `llvm-` | LLVM coding convention checks. |
+| `cert-` | CERT Secure Coding Standard checks. |
+| `concurrency-` | Checks for threading and concurrency issues. |
+| `misc-` | Miscellaneous checks without a better category. |
+
+Use `clang-tidy -checks=* -list-checks` to see every available check.
+
+### Configuration file
+
+Place a `.clang-tidy` file at your project root to persist check configuration:
+
+```yaml
+# .clang-tidy
+Checks: >
+  -*, 
+  bugprone-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  performance-unnecessary-copy-initialization,
+  readability-identifier-naming
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: camelBack
+WarningsAsErrors: "bugprone-*"
+```
+
+`clang-tidy` searches upward from the file being analyzed to find the nearest `.clang-tidy` file.
+
+### Key flags
+
+| Flag | Description |
+|------|-------------|
+| `-checks=<globs>` | Comma-separated glob list of checks to enable/disable (prefix with `-` to disable). |
+| `--fix` | Apply suggested fixes automatically. |
+| `--fix-errors` | Apply fixes even when compilation errors are present. |
+| `-list-checks` | Print the list of enabled checks and exit. |
+| `--config=<yaml>` | Pass configuration inline as a YAML string. |
+| `--config-file=<path>` | Load configuration from a specific file. |
+| `--header-filter=<regex>` | Also report diagnostics from headers matching the regex. |
+| `-warnings-as-errors=<globs>` | Treat matching check warnings as errors. |
+| `--export-fixes=<file>` | Write fix suggestions to a YAML file for batch application. |
+
+---
+
+## clang-format
+
+`clang-format` reformats C, C++, Objective-C, Java, JavaScript, and other source files according to a configurable style.
+
+### Running clang-format
+
+```bash
+# Format a file in-place
+clang-format -i file.cpp
+
+# Format and print to stdout (no modification)
+clang-format file.cpp
+
+# Format only lines 10-20
+clang-format --lines=10:20 file.cpp
+
+# Check if a file is formatted (exit 1 if not)
+clang-format --dry-run --Werror file.cpp
+```
+
+### Style configuration
+
+`clang-format` supports named styles and a `.clang-format` config file.
+
+**Named styles** (pass with `--style=`):
+
+```bash
+clang-format --style=llvm -i file.cpp
+clang-format --style=google -i file.cpp
+clang-format --style=chromium -i file.cpp
+clang-format --style=mozilla -i file.cpp
+clang-format --style=webkit -i file.cpp
+```
+
+**`.clang-format` file** — place at the repository root:
+
+```yaml
+# .clang-format
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: Inline
+BreakBeforeBraces: Attach
+SortIncludes: CaseSensitive
+```
+
+Generate a base config from a named style:
+
+```bash
+clang-format --style=llvm --dump-config > .clang-format
+```
+
+### Disabling formatting locally
+
+```cpp
+// clang-format off
+int formatted_code;
+  int   badly_formatted_code;
+// clang-format on
+```
+
+---
+
+## clangd
+
+`clangd` is a language server that implements the [Language Server Protocol (LSP)](https://microsoft.github.io/language-server-protocol/). It gives any LSP-capable editor accurate C++ intelligence powered by Clang.
+
+### Features
+
+- Code completion with full type information
+- Go-to-definition and find-references (across files)
+- Inline diagnostics (errors and warnings as you type)
+- Hover documentation
+- Signature help
+- Code actions and quick fixes (includes clang-tidy fixes)
+- Rename refactoring
+- Inlay hints
+
+### IDE integration
+
+`clangd` is supported by all major editors:
+
+| Editor | Integration |
+|--------|-------------|
+| VS Code | [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) |
+| Neovim | Built-in LSP client (`vim.lsp`) or via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig) |
+| Emacs | [lsp-mode](https://emacs-lsp.github.io/lsp-mode/) or [eglot](https://joaotavora.github.io/eglot/) |
+| CLion | Built-in (CLion ships its own clangd) |
+| Sublime Text | [LSP-clangd](https://packagecontrol.io/packages/LSP-clangd) |
+
+### Setup
+
+Point `clangd` at your `compile_commands.json` by placing it at the project root, or configure the `--compile-commands-dir` flag:
+
+```bash
+clangd --compile-commands-dir=build/
+```
+
+You can create a `.clangd` configuration file in your project root:
+
+```yaml
+# .clangd
+CompileFlags:
+  Add: [-std=c++17, -Wextra]
+  Remove: [-W*]   # strip all -W flags from the db and use only the above
+
+Diagnostics:
+  ClangTidy:
+    Add: [modernize-*, bugprone-*]
+    Remove: [modernize-use-trailing-return-type]
+```
+
+### Running clangd manually
+
+`clangd` is typically launched by your editor, but you can invoke it directly for debugging:
+
+```bash
+clangd --log=verbose --pretty 2>clangd.log
+```
+
+---
+
+## clang-doc
+
+`clang-doc` generates API documentation from C++ source by parsing the actual AST. Unlike Doxygen, it understands all C++ constructs correctly.
+
+```bash
+# Generate HTML documentation
+clang-doc --format=html --output=docs/ --executor=all-TUs \
+  compile_commands.json
+
+# Generate Markdown documentation
+clang-doc --format=md --output=docs/ --executor=all-TUs \
+  compile_commands.json
+```
+
+---
+
+## Writing custom clang-tidy checks
+
+You can extend `clang-tidy` with project-specific checks. Each check is a C++ class that registers AST matchers or preprocessor callbacks.
+
+### Structure
+
+Custom checks live in modules. The `add_new_check.py` script in `clang-tools-extra/clang-tidy/` scaffolds the boilerplate:
+
+```bash
+cd llvm-project/clang-tools-extra/clang-tidy
+python add_new_check.py mynamespace my-check-name
+```
+
+This creates:
+
+```text
+clang-tidy/mynamespace/MyCheckNameCheck.h
+clang-tidy/mynamespace/MyCheckNameCheck.cpp
+test/clang-tidy/checkers/mynamespace/my-check-name.cpp
+```
+
+### Minimal check example
+
+```cpp
+// MyCheckNameCheck.cpp
+#include "MyCheckNameCheck.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/ASTMatchers/ASTMatchFinder.h"
+
+using namespace clang::ast_matchers;
+
+namespace clang::tidy::mynamespace {
+
+void MyCheckNameCheck::registerMatchers(MatchFinder *Finder) {
+  // Match every call to a function named "badFunction"
+  Finder->addMatcher(
+    callExpr(callee(functionDecl(hasName("badFunction")))).bind("call"),
+    this);
+}
+
+void MyCheckNameCheck::check(const MatchFinder::MatchResult &Result) {
+  const auto *Call = Result.Nodes.getNodeAs<CallExpr>("call");
+  diag(Call->getBeginLoc(), "prefer goodFunction() over badFunction()");
+}
+
+} // namespace clang::tidy::mynamespace
+```
+
+### Key APIs
+
+| API | Purpose |
+|-----|---------|
+| `registerMatchers()` | Register AST matchers that trigger the check. |
+| `check()` | Called for each match. Issue diagnostics here. |
+| `diag()` | Emit a diagnostic (warning) at a source location. |
+| `registerPPCallbacks()` | Hook into the preprocessor instead of the AST. |
+
+<Tip>
+Use `clang-query` to prototype AST matchers interactively before writing C++ code:
+
+```bash
+clang-query file.cpp --
+```
+
+Then enter matchers at the prompt to see what they match in real source.
+</Tip>

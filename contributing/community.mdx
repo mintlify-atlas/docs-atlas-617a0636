@@ -1,0 +1,114 @@
+---
+title: "Community"
+description: "How to connect with the LLVM community through forums, chat, office hours, working groups, and developer conferences."
+---
+
+LLVM is a large, distributed open source project with an active community across multiple communication channels. The [LLVM Code of Conduct](https://llvm.org/docs/CodeOfConduct.html) applies to all of them.
+
+## Discourse forums
+
+The [LLVM Discourse forums](https://discourse.llvm.org) are the primary communication channel for the project. Discourse is the successor to the former mailing lists (`llvm-dev@`, `cfe-dev@`, `lldb-dev@`, etc.).
+
+Use Discourse for:
+
+- Proposing major changes or new designs as RFCs (Requests for Comment)
+- Asking questions about LLVM internals or development practices
+- Announcements, release notes, and project-wide discussions
+- Subproject-specific discussions in the relevant category
+
+Discourse is public and archived. Confidentiality or non-disclosure notices cannot be respected on this platform.
+
+<Note>
+The [Announcements category](https://discourse.llvm.org/c/announce/46) covers project-wide announcements such as releases, developer meetings, and blog posts.
+</Note>
+
+## Discord
+
+The [LLVM Discord server](https://discord.gg/xS7Z362) provides real-time chat for users and developers of LLVM and its subprojects (including Clang). The server is actively moderated.
+
+Notable channels include:
+
+- **#buildbot-status** — automated notifications when LLVM buildbots change state (passing to failing or back)
+- **#office-hours** — announcements from contributors hosting office hours sessions
+- **#beginners** — a welcoming space for new contributors
+
+The Discord bot also supports `@mention` notifications when your email address appears on a buildbot blamelist. DM `help` to the bot for details.
+
+## Office hours
+
+A number of experienced LLVM contributors make themselves available on a regular schedule for guidance. You can join these sessions without an appointment — don't be too shy to dial in.
+
+Office hours are listed on the [LLVM community calendar](https://calendar.google.com/calendar/u/0/embed?src=calendar@llvm.org). Some examples:
+
+| Name | Topics | Schedule |
+|---|---|---|
+| Kristof Beyls | General contribution questions, Arm/AArch64 codegen, LLVM security | Every 2nd and 4th Wednesday at 9:30am CET |
+| Alina Sbirlea | General contribution questions, MemorySSA, loop passes, new pass manager | Monthly, 2nd Tuesdays at 10:00am PT |
+| Aaron Ballman | Clang internals, frontend attributes, clang-tidy, AST matchers | Monthly, 2nd Monday and 3rd Friday at 10:00am and 2:00pm Eastern |
+| Johannes Doerfert | OpenMP, LLVM IR, interprocedural optimizations, Attributor | Weekly, Wednesdays at 9:30am PT |
+| Tobias Grosser | General LLVM/MLIR questions, Polly, loop optimization, GSoC | Monthly, last Monday at 18:00 London time |
+
+The full and up-to-date list is available in the [Getting Involved documentation](https://llvm.org/docs/GettingInvolved.html#office-hours).
+
+## Online sync-ups and working groups
+
+LLVM organizes regular video calls on specific topics. These are open to anyone interested. The [LLVM community calendar](https://calendar.google.com/calendar/u/0/embed?src=calendar@llvm.org) lists all upcoming events.
+
+Current active sync-ups include:
+
+- **Loop Optimization Working Group** — first Wednesday of the month
+- **RISC-V** — every two weeks on Thursday
+- **LLVM Security Group** — monthly, every third Tuesday
+- **Clang C and C++ Language Working Group** — 1st and 3rd Wednesday of the month
+- **GlobalISel** — every second Tuesday of the month
+- **MLIR C/C++ Frontend Working Group** — monthly, usually first Monday
+- **Vectorizer Improvement Working Group** — third Tuesday of the month
+
+The Code of Conduct applies to all online sync-ups.
+
+## Mailing lists
+
+Several commit and bug mailing lists are available for those who want to track LLVM activity via email:
+
+<AccordionGroup>
+  <Accordion title="llvm-commits">
+    Receives all commit messages when LLVM developers push changes to the repository. Very high volume. Archives available at [lists.llvm.org](http://lists.llvm.org/pipermail/llvm-commits/).
+  </Accordion>
+  <Accordion title="llvm-bugs">
+    Receives a notification every time a bug is opened or closed on the issue tracker. Higher volume than the general discussion forum. Archives at [lists.llvm.org](http://lists.llvm.org/pipermail/llvm-bugs/).
+  </Accordion>
+</AccordionGroup>
+
+You can also subscribe to GitHub team notifications for specific parts of the codebase:
+
+- [pr-subscribers-\*](https://github.com/orgs/llvm/teams?query=pr-subscribers) teams — notified of pull requests touching specific paths
+- [issue-subscribers-\*](https://github.com/orgs/llvm/teams?query=issue-subscribers) teams — notified of issues in specific components
+
+## LLVM Developer Conferences
+
+LLVM holds developer meetings and conferences where contributors present talks, tutorials, and technical discussions. Past and upcoming events are listed at [llvm.org/devmtg](https://llvm.org/devmtg/).
+
+There are also local user groups called [LLVM Socials](https://www.meetup.com/pro/llvm/) in cities around the world. If there is no group in your city, you can start one — see the [Meetup Guidelines](https://llvm.org/docs/MeetupGuidelines.html).
+
+## Code of Conduct
+
+The LLVM Community [Code of Conduct](https://llvm.org/docs/CodeOfConduct.html) applies to all participants in all modes of communication: Discourse forums, Discord, GitHub, office hours, online sync-ups, and developer conferences.
+
+To report a Code of Conduct issue, contact the event organizers and email [conduct@llvm.org](mailto:conduct@llvm.org).
+
+## Getting help as a new contributor
+
+<CardGroup cols={2}>
+  <Card title="Discourse forums" icon="comments" href="https://discourse.llvm.org">
+    Post questions about LLVM internals, development practices, or your patch on the Discourse forums. The community is welcoming to newcomers.
+  </Card>
+  <Card title="Discord" icon="message" href="https://discord.gg/xS7Z362">
+    The #beginners channel on Discord is a good place for quick questions and informal discussion.
+  </Card>
+  <Card title="Office hours" icon="clock" href="https://llvm.org/docs/GettingInvolved.html#office-hours">
+    Join an office hours session to speak directly with an experienced contributor about your contribution or any LLVM question.
+  </Card>
+  <Card title="Good first issues" icon="circle-check" href="https://github.com/llvm/llvm-project/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22">
+    Browse issues labeled "good first issue" on GitHub to find accessible entry points into the codebase.
+  </Card>
+</CardGroup>

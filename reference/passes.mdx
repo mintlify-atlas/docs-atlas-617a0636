@@ -1,0 +1,326 @@
+---
+title: "Optimization passes reference"
+description: "Analysis, transform, and utility passes available in LLVM, with optimization pipeline presets and how to run them with opt."
+---
+
+LLVM implements optimizations as modular passes. Each pass traverses some portion of the program — a function, a loop, or a module — either to collect information (analysis) or to rewrite it (transform). Passes are composed into pipelines by the pass manager.
+
+<Note>
+The canonical pass list is generated at build time. Run `opt -print-passes` to see every pass available in your build, including passes from loaded plugins.
+</Note>
+
+## Pass categories
+
+| Category | Purpose |
+|----------|---------|
+| **Analysis** | Compute information about the program for use by other passes or for visualization. |
+| **Transform** | Mutate the program. May consume analysis results and will invalidate analyses that the transform affects. |
+| **Utility** | Administrative tasks (printing, extraction, verification) that don't fit neatly into either category. |
+
+## Listing and running passes
+
+```bash
+# List all passes known to opt:
+opt -print-passes
+
+# Run a single pass:
+opt -S -passes=mem2reg input.ll -o output.ll
+
+# Chain multiple passes:
+opt -S -passes="sroa,mem2reg,instcombine,simplifycfg" input.ll -o output.ll
+
+# Run at a preset optimization level:
+opt -S -O2 input.ll -o output.ll
+```
+
+## Optimization pipeline presets
+
+Standard pipelines mirror what `clang` runs after lowering to IR:
+
+| Flag | Description |
+|------|-------------|
+| `-O0` | No optimization. All variables remain as allocas. |
+| `-O1` | Basic optimizations: mem2reg, instcombine, simplifycfg, early inlining. |
+| `-O2` | Full pipeline: all `-O1` passes plus LICM, GVN, SROA, loop vectorization, and more. |
+| `-O3` | Aggressive: adds loop unrolling, SLP vectorization, and more inlining. |
+| `-Os` | Optimize for size: like `-O2` but avoids transforms that increase code size. |
+| `-Oz` | Minimize size aggressively: reduces code size at the expense of performance. |
+
+<Tip>
+Use `-passes=default<O2>` to run the standard `-O2` pipeline explicitly through the new pass manager.
+</Tip>
+
+## Analysis passes
+
+<AccordionGroup>
+  <Accordion title="domtree — Dominator tree construction">
+    Computes the dominator tree for a function. A block `A` dominates block `B` if every path from the function entry to `B` passes through `A`. Required by many transform passes.
+
+    ```bash
+    opt -passes="domtree,function(print<domtree>)" -disable-output input.ll
+    ```
+  </Accordion>
+
+  <Accordion title="domfrontier — Dominance frontier construction">
+    Builds the dominance frontier for each basic block. The dominance frontier of `A` is the set of blocks where `A`'s dominance stops. Used in SSA construction (mem2reg) and other algorithms.
+  </Accordion>
+
+  <Accordion title="loops — Natural loop information">
+    Identifies natural loops and computes loop depth for all CFG nodes. A natural loop has a single header and a back edge. Multiple natural loops sharing a header are reported together.
+
+    ```bash
+    opt -passes="loops,function(print<loops>)" -disable-output input.ll
+    ```
+  </Accordion>
+
+  <Accordion title="scalar-evolution — Scalar evolution analysis">
+    Analyzes and categorizes scalar expressions in loops, specializing in induction variables. Represents them with the abstract `SCEV` class. Provides loop trip counts and recurrence patterns consumed by loop transforms like `indvars`, `licm`, and `loop-vectorize`.
+
+    ```bash
+    opt -passes="scalar-evolution,function(print<scalar-evolution>)" -disable-output input.ll
+    ```
+  </Accordion>
+
+  <Accordion title="basic-aa — Basic alias analysis">
+    A stateless alias analysis pass that identifies non-aliasing pairs using simple identities: two distinct global variables cannot alias, a global and a stack allocation cannot alias, etc. Forms the foundation of the alias analysis pipeline.
+  </Accordion>
+
+  <Accordion title="scev-aa — ScalarEvolution-based alias analysis">
+    An alias analysis that uses `ScalarEvolution` queries to determine whether two pointers alias within a single loop iteration. More powerful than `basic-aa` for array accesses inside loops.
+  </Accordion>
+
+  <Accordion title="globals-aa — Simple mod/ref analysis for globals">
+    Tracks whether functions read or write non-local memory and whether global variables have their address taken. For functions and globals that pass the conservative checks it provides accurate mod/ref information.
+  </Accordion>
+
+  <Accordion title="memdep — Memory dependence analysis">
+    For a given memory operation, determines which preceding memory operations it depends on. Provides a lazy, cached interface over alias analysis. Used by `gvn` and `memcpyopt`.
+  </Accordion>
+
+  <Accordion title="da — Dependence analysis">
+    Detects dependencies between memory accesses. Used to prove that loop transforms (like `loop-unroll-and-jam`) are safe to apply.
+  </Accordion>
+
+  <Accordion title="lazy-value-info — Lazy value information">
+    Computes constraints on values at specific program points without a full dataflow analysis pass. Used by `jump-threading` and `correlated-value-propagation`.
+  </Accordion>
+
+  <Accordion title="stack-safety — Stack safety analysis">
+    Determines whether stack-allocated variables can be proven safe from out-of-bounds accesses. Primarily used by sanitizers to avoid instrumenting provably safe allocations.
+  </Accordion>
+</AccordionGroup>
+
+## Transform passes
+
+<AccordionGroup>
+  <Accordion title="mem2reg — Promote memory to register">
+    Promotes `alloca` instructions that are only accessed through `load` and `store` into SSA registers, inserting `phi` nodes at join points. This is the standard SSA construction algorithm and is usually the first pass in any optimization pipeline.
+
+    Without `mem2reg`, `clang -O0` output consists almost entirely of `alloca`/`store`/`load` triples. After `mem2reg`, variables live in virtual registers and most other passes can operate on them.
+
+    ```bash
+    opt -S -passes=mem2reg input.ll -o output.ll
+    ```
+
+    ```llvm
+    ; Before mem2reg:
+    %x = alloca i32
+    store i32 42, ptr %x
+    %val = load i32, ptr %x
+    ret i32 %val
+
+    ; After mem2reg:
+    ret i32 42
+    ```
+  </Accordion>
+
+  <Accordion title="sroa — Scalar replacement of aggregates">
+    Breaks up `alloca` instructions of aggregate type (structs, arrays) into individual scalar `alloca` instructions for each member, then promotes them to SSA form. Subsumes and extends `mem2reg` for aggregate types.
+
+    ```bash
+    opt -S -passes=sroa input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="instcombine — Combine redundant instructions">
+    A worklist-driven pass that rewrites instructions into simpler, canonical forms without modifying the CFG. This is where algebraic simplification lives.
+
+    Examples of transformations it performs:
+
+    ```llvm
+    ; Constant folding of adjacent adds:
+    %Y = add i32 %X, 1
+    %Z = add i32 %Y, 1
+    ; becomes:
+    %Z = add i32 %X, 2
+
+    ; Strength reduction:
+    %r = mul i32 %x, 8
+    ; becomes:
+    %r = shl i32 %x, 3
+    ```
+
+    Also simplifies calls to well-known library functions (e.g. `exit(3)` in `main` becomes `ret i32 3`).
+
+    ```bash
+    opt -S -passes=instcombine input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="simplifycfg — Simplify the control flow graph">
+    Cleans up the CFG after other passes create unnecessary structure:
+
+    - Removes basic blocks with no predecessors.
+    - Merges a block into its predecessor when there is a single predecessor/successor pair.
+    - Eliminates `phi` nodes for single-predecessor blocks.
+    - Removes blocks containing only an unconditional branch.
+
+    ```bash
+    opt -S -passes=simplifycfg input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="inline — Function inlining">
+    Bottom-up inlining of callees into their callers based on a cost model. The inliner evaluates the size of the callee and the call site context to decide whether inlining is profitable.
+
+    ```bash
+    opt -S -passes=inline input.ll -o output.ll
+    ```
+
+    The `always-inline` pass handles functions marked `__attribute__((always_inline))` unconditionally.
+  </Accordion>
+
+  <Accordion title="licm — Loop invariant code motion">
+    Hoists computations that produce the same value on every iteration to the loop preheader, and sinks instructions to loop exit blocks when safe. Also promotes loop-invariant memory locations to registers using `mem2reg` internally.
+
+    ```bash
+    opt -S -passes=licm input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="gvn — Global value numbering">
+    Eliminates fully and partially redundant instructions using value numbering. Also performs redundant load elimination by tracking memory state across basic blocks.
+
+    ```bash
+    opt -S -passes=gvn input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="sccp — Sparse conditional constant propagation">
+    Propagates constant values through the CFG, treating branches on known constants as unconditional. Eliminates dead basic blocks that follow unreachable conditional branches.
+
+    - Assumes values are constant unless proven otherwise.
+    - Assumes basic blocks are dead unless proven otherwise.
+    - Turns conditional branches on constants into unconditional branches.
+
+    Run `dce` or `adce` after `sccp` to clean up the definitions it makes dead.
+
+    ```bash
+    opt -S -passes="sccp,adce" input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="tailcallelim — Tail call elimination">
+    Converts tail-recursive calls into loops. Handles self-recursion followed by a `ret`, and also transforms associative accumulator patterns (e.g. naive factorial, fibonacci) into iterative form:
+
+    ```bash
+    opt -S -passes=tailcallelim input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="dce — Dead code elimination">
+    Removes instructions whose results are never used, rechecking upstream definitions as instructions are removed.
+
+    `adce` (aggressive dead code elimination) is a stronger variant that assumes all values are dead until proven live, rather than the reverse.
+
+    ```bash
+    opt -S -passes=dce input.ll -o output.ll
+    opt -S -passes=adce input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="loop-vectorize — Loop vectorizer">
+    Transforms scalar loops into vectorized SIMD loops using target vector width. Relies on `scalar-evolution` and alias analysis to prove safety.
+
+    ```bash
+    opt -S -passes=loop-vectorize input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="slp-vectorizer — SLP vectorizer">
+    Vectorizes straight-line code (superword level parallelism) by packing independent scalar operations that share the same opcode into SIMD operations.
+
+    ```bash
+    opt -S -passes=slp-vectorizer input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="indvars — Canonicalize induction variables">
+    Normalizes loop induction variables to start at zero and step by one. Canonicalizes exit conditions to compare against the trip count. Required before many loop passes.
+
+    ```bash
+    opt -S -passes=indvars input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="loop-unroll — Unroll loops">
+    Replicates the loop body multiple times for loops with a computable trip count, reducing loop overhead and enabling further optimizations on the unrolled body.
+
+    ```bash
+    opt -S -passes=loop-unroll input.ll -o output.ll
+    ```
+  </Accordion>
+
+  <Accordion title="jump-threading — Jump threading">
+    Finds basic blocks with multiple predecessors and multiple successors where a predecessor can be proven to always jump to a specific successor. Duplicates the block and forwards the edge to eliminate the redundant branch.
+  </Accordion>
+
+  <Accordion title="reassociate — Reassociate expressions">
+    Reorders commutative expressions to promote opportunities for constant propagation, CSE, and LICM. For example: `4 + (x + 5)` becomes `x + (4 + 5)` so the constants can be folded.
+  </Accordion>
+
+  <Accordion title="globaldce — Dead global elimination">
+    Removes internal global variables and functions that are not reachable from any live root. Uses an aggressive algorithm that handles recursive dead cycles.
+  </Accordion>
+
+  <Accordion title="globalopt — Global variable optimizer">
+    Transforms simple global variables that never have their address taken — marks provably read-only globals as `constant`, deletes write-only globals, etc.
+  </Accordion>
+</AccordionGroup>
+
+## Utility passes
+
+<AccordionGroup>
+  <Accordion title="verify — Module verifier">
+    Checks that the IR is well-formed SSA. Verifies type consistency of operands, phi node completeness, basic block terminators, and many other structural invariants.
+
+    ```bash
+    opt -passes=verify input.ll -disable-output
+    ```
+
+    Use `-verify-each` with `opt` to run the verifier after every pass in a pipeline, which helps isolate which pass corrupts the IR.
+  </Accordion>
+
+  <Accordion title="instnamer — Assign names to anonymous instructions">
+    Gives names to unnamed (`%0`, `%1`, ...) instructions. Makes IR diffs readable by preventing a single deletion from renumbering every subsequent value.
+
+    ```bash
+    opt -S -passes=instnamer input.ll -o named.ll
+    ```
+  </Accordion>
+
+  <Accordion title="strip — Strip all symbols from a module">
+    Removes virtual register names, internal symbol names, and debug information. Useful when producing stripped release builds or when reducing IR for reproduction cases.
+  </Accordion>
+
+  <Accordion title="dot-cfg — Print CFG to dot file">
+    Emits the control flow graph of each function as a Graphviz `.dot` file, which can be rendered with the `dot` tool:
+
+    ```bash
+    opt -passes=dot-cfg -disable-output input.ll
+    dot -Tpdf .example.dot -o cfg.pdf
+    ```
+
+    Use `-cfg-func-name=<substring>` to filter to specific functions.
+  </Accordion>
+</AccordionGroup>

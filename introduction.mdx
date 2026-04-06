@@ -1,0 +1,82 @@
+---
+title: "Introduction to LLVM"
+description: "LLVM is a collection of modular and reusable compiler and toolchain technologies used to build compilers, optimizers, and runtime environments."
+---
+
+## What is LLVM?
+
+LLVM is a toolkit for the construction of highly optimized compilers, optimizers, and runtime environments. At its core, LLVM defines a language-independent intermediate representation (IR) — a strongly typed, low-level instruction set that serves as the common currency between frontends, middle-end optimization passes, and target-specific backends.
+
+The project provides:
+
+- **LLVM IR** — A well-specified, SSA-form intermediate representation in both human-readable (`.ll`) and binary bitcode (`.bc`) formats.
+- **Pass system** — A pipeline of analysis and transformation passes that operate on IR. Passes can be composed and ordered to perform optimizations such as dead code elimination, inlining, loop transformations, and vectorization.
+- **Backends** — Target-specific code generators that lower LLVM IR to machine code for a given architecture. The code generator is divided into instruction selection, instruction scheduling, and register allocation phases.
+- **Tools** — A set of standalone utilities including `llc` (the static compiler), `opt` (the IR optimizer), `llvm-as`/`llvm-dis` (assembler/disassembler), `lli` (the interpreter and JIT), and `llvm-ar` (the archiver).
+
+<Note>
+All LLVM sub-projects are developed together in a single **monorepo** at [github.com/llvm/llvm-project](https://github.com/llvm/llvm-project). The core LLVM libraries live under `llvm/`, while each sub-project (Clang, LLD, LLDB, etc.) occupies its own top-level directory.
+</Note>
+
+## Major components
+
+<CardGroup cols={2}>
+  <Card title="LLVM Core" icon="microchip" href="/concepts/ir-overview">
+    The core libraries: IR representation, analysis and transformation passes, the code generator, and all tools. Contains the assembler, disassembler, bitcode analyzer, and optimizer.
+  </Card>
+  <Card title="Clang" icon="c" href="/subprojects/clang">
+    The C-family frontend. Compiles C, C++, Objective-C, and Objective-C++ into LLVM bitcode and, from there, into object files using the LLVM backend.
+  </Card>
+  <Card title="LLD" icon="link" href="/subprojects/lld">
+    A high-performance linker. Supports ELF, COFF, Mach-O, and WebAssembly object formats. Typically several times faster than the system linker on large projects.
+  </Card>
+  <Card title="LLDB" icon="bug" href="/subprojects/lldb">
+    A debugger built on top of LLVM and Clang libraries. Supports C, C++, Objective-C, and Swift. Used as the default debugger on macOS and iOS.
+  </Card>
+  <Card title="MLIR" icon="diagram-project" href="/subprojects/mlir">
+    Multi-Level Intermediate Representation. A framework for building reusable and extensible compiler infrastructure, with support for custom dialects and progressive lowering.
+  </Card>
+  <Card title="Flang" icon="f" href="/subprojects/flang">
+    A Fortran frontend built on LLVM. Implements Fortran 2018 and targets the LLVM backend, sharing the same code generation infrastructure as Clang.
+  </Card>
+</CardGroup>
+
+The monorepo also includes:
+
+- **libc++** — An implementation of the C++ standard library.
+- **libc++abi** — The low-level C++ ABI library.
+- **compiler-rt** — Runtime support libraries for sanitizers (AddressSanitizer, MemorySanitizer, etc.) and profiling.
+- **polly** — A high-level loop optimizer using polyhedral model techniques.
+- **clang-tools-extra** — Additional Clang-based tools including `clang-tidy` and `clangd`.
+
+## Key use cases
+
+**Building compilers**
+LLVM provides all the components needed to construct a complete compiler: a well-defined IR to target, a rich set of analyses and optimizations, and target backends for every major architecture. New language frontends emit LLVM IR and immediately gain access to the full LLVM optimization and code generation pipeline.
+
+**Writing passes**
+The LLVM pass infrastructure lets you write modular analysis and transformation passes in C++. Passes can inspect or rewrite IR, query other analyses (e.g., dominator trees, alias analysis, loop information), and be composed into custom optimization pipelines using the new pass manager.
+
+**JIT compilation**
+LLVM's ORC (On-Request Compilation) JIT APIs allow you to compile and execute LLVM IR at runtime. The `lli` tool demonstrates this; the `BuildingAJIT` tutorial series shows how to construct a custom JIT suited to your use case.
+
+## Supported targets
+
+LLVM includes production-quality backends for the following architectures:
+
+| Architecture | Notes |
+|---|---|
+| x86 / x86-64 | Primary development and CI target |
+| ARM / AArch64 | Used on Linux, macOS (Apple Silicon), iOS |
+| RISC-V | RV32 and RV64, with vector extension support |
+| AMDGPU | ROCm GPU compute and graphics |
+| NVPTX | NVIDIA GPU code generation via PTX |
+| PowerPC | Linux and AIX targets |
+| SystemZ | IBM Z mainframe |
+| MIPS | 32-bit and 64-bit variants |
+| WebAssembly | wasm32 and wasm64 |
+| LoongArch | LoongArch 32 and 64-bit |
+| Sparc | 32-bit and V9 |
+| Hexagon | Qualcomm DSP target |
+
+LLVM is known to work on Linux (x86, amd64, ARM, AArch64, LoongArch, MIPS, PowerPC, RISC-V, SystemZ), macOS (x86, arm64), FreeBSD, NetBSD, OpenBSD, Solaris, and Windows (x86, x86-64, ARM64).

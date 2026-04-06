@@ -1,0 +1,192 @@
+---
+title: "llc — LLVM Static Compiler"
+description: "Compile LLVM IR or bitcode to native assembly or object files for any supported target architecture."
+---
+
+`llc` is the LLVM static compiler. It takes LLVM IR (`.ll`) or bitcode (`.bc`) as input and produces native assembly or object code for a target architecture. `llc` is the final code-generation step in the LLVM pipeline — the output can be passed directly to a system assembler and linker to produce an executable.
+
+## Basic usage
+
+```bash
+llc [options] input.ll -o output.s
+```
+
+If you omit `-o`, `llc` derives the output filename from the input (replacing `.bc` with `.s`). Reading from stdin is supported by passing `-` as the filename.
+
+## Key flags
+
+| Flag | Description |
+|------|-------------|
+| `-march=<arch>` | Target architecture (`x86`, `x86-64`, `aarch64`, `riscv64`, `arm`, `mips`, etc.). |
+| `-mtriple=<triple>` | Full target triple (e.g. `x86_64-pc-linux-gnu`, `aarch64-linux-gnu`). Overrides the triple embedded in the input file. |
+| `-mcpu=<cpu>` | Specific CPU to target (`native`, `cortex-a55`, `znver3`, `sifive-u74`, etc.). |
+| `-mattr=<features>` | Comma-separated CPU feature toggles (e.g. `+avx2,-sse4.2`, `+neon`). |
+| `-filetype=<type>` | Output format: `asm` (default, text assembly), `obj` (binary object file), or `null` (discard output). |
+| `-O=<n>` | Code-generation optimization level: `0`, `1`, `2`, or `3`. |
+| `-o <file>` | Write output to `<file>`. |
+| `-stop-after=<pass>` | Stop after the named codegen pass and dump MIR (useful for debugging). |
+| `--print-after-all` | Print the IR or MIR after every codegen pass. |
+| `--print-after-isel` | Print machine IR immediately after instruction selection. |
+| `--regalloc=<allocator>` | Register allocator to use: `fast`, `greedy`, `basic`, or `pbqp`. |
+| `--x86-asm-syntax=[att\|intel]` | Choose AT&T (default) or Intel assembly syntax (x86 only). |
+| `--stats` | Print code-generation pass statistics. |
+| `--time-passes` | Print per-pass timing to stderr. |
+| `--frame-pointer=[all\|non-leaf\|none]` | Control frame pointer elimination. |
+
+## Examples
+
+<CodeGroup>
+
+```bash compile to x86-64 assembly
+llc -march=x86-64 input.ll -o output.s
+```
+
+```bash compile to object file
+llc -filetype=obj input.ll -o output.o
+```
+
+```bash cross-compile to AArch64
+llc -march=aarch64 -mtriple=aarch64-linux-gnu input.ll -o output.s
+```
+
+```bash target a specific CPU
+llc -march=aarch64 -mcpu=cortex-a55 input.ll -o output.s
+```
+
+```bash enable AVX2 on x86
+llc -march=x86-64 -mattr=+avx2 input.ll -o output.s
+```
+
+```bash compile to RISC-V assembly
+llc -march=riscv64 -mtriple=riscv64-unknown-linux-gnu -mattr=+m,+a,+f,+d input.ll -o output.s
+```
+
+```bash Intel syntax output
+llc -march=x86-64 --x86-asm-syntax=intel input.ll -o output.s
+```
+
+</CodeGroup>
+
+## Listing supported targets
+
+Run `llc --version` to see which targets were compiled in:
+
+```bash
+llc --version
+```
+
+```text
+LLVM (http://llvm.org/):
+  LLVM version 18.0.0
+  ...
+  Registered Targets:
+    aarch64    - AArch64 (little endian)
+    arm        - ARM
+    riscv32    - 32-bit RISC-V
+    riscv64    - 64-bit RISC-V
+    x86        - 32-bit X86: Pentium-Pro and above
+    x86-64     - 64-bit X86: EM64T and AMD64
+    ...
+```
+
+To list CPUs available for a given architecture:
+
+```bash
+llvm-as < /dev/null | llc -march=aarch64 -mcpu=help
+```
+
+To list available feature attributes:
+
+```bash
+llvm-as < /dev/null | llc -march=x86-64 -mattr=help
+```
+
+## Output formats
+
+<Tabs>
+  <Tab title="Assembly (.s)">
+    The default. Produces human-readable assembly that you can inspect or pass to an assembler:
+
+    ```bash
+    llc -filetype=asm input.ll -o output.s
+    as output.s -o output.o
+    ```
+  </Tab>
+  <Tab title="Object file (.o)">
+    Produces a relocatable object file directly, skipping the separate assembler step:
+
+    ```bash
+    llc -filetype=obj input.ll -o output.o
+    ld output.o -o my_program
+    ```
+  </Tab>
+  <Tab title="Null output">
+    Runs all codegen passes but discards output. Useful for benchmarking:
+
+    ```bash
+    llc -filetype=null --time-passes input.ll
+    ```
+  </Tab>
+</Tabs>
+
+## Debugging codegen passes
+
+Use `-stop-after=<pass>` to stop compilation at a specific point and inspect the Machine IR (MIR):
+
+```bash
+# Stop after instruction selection and dump MIR
+llc -stop-after=instruction-select input.ll -o output.mir
+```
+
+To print IR after every pass:
+
+```bash
+llc --print-after-all input.ll -o output.s 2>&1 | less
+```
+
+<Note>
+Pass names for `-stop-after` use the internal codegen pass names. Run `llc --help-hidden` to see available pass names or check `llvm/lib/CodeGen/` in the source tree.
+</Note>
+
+## Register allocators
+
+`llc` supports multiple register allocation strategies:
+
+| Allocator | Notes |
+|-----------|-------|
+| `fast` | Default for `-O0`. Fast but produces poor register assignments. |
+| `greedy` | Default for `-O1` and above. Best code quality for optimized builds. |
+| `basic` | A basic iterative allocator. Primarily used for testing. |
+| `pbqp` | Partitioned Boolean Quadratic Programming allocator. |
+
+```bash
+# Use the fast register allocator explicitly
+llc --regalloc=fast -O0 input.ll -o output.s
+```
+
+## Full compile pipeline example
+
+Compile a C file to a native binary using `clang`, `opt`, `llc`, and `ld`:
+
+<Steps>
+  <Step title="Lower C to LLVM IR">
+    ```bash
+    clang -S -emit-llvm -O0 hello.c -o hello.ll
+    ```
+  </Step>
+  <Step title="Optimize IR with opt">
+    ```bash
+    opt -S -O2 hello.ll -o hello.opt.ll
+    ```
+  </Step>
+  <Step title="Compile IR to assembly with llc">
+    ```bash
+    llc -march=x86-64 -filetype=obj hello.opt.ll -o hello.o
+    ```
+  </Step>
+  <Step title="Link the object file">
+    ```bash
+    clang hello.o -o hello
+    ```
+  </Step>
+</Steps>

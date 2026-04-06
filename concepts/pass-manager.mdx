@@ -1,0 +1,241 @@
+---
+title: "Pass Manager"
+description: "How LLVM passes work, the new pass manager architecture, pass hierarchy, and how to write and run passes."
+keywords: ["LLVM pass", "pass manager", "NPM", "FunctionPass", "ModulePass", "opt", "PassBuilder"]
+---
+
+The LLVM pass framework is an important part of the LLVM system. Passes perform the transformations and optimizations that make up the compiler, build the analysis results used by those transformations, and serve as the primary structuring technique for compiler code.
+
+## Analysis passes vs. transform passes
+
+<CardGroup cols={2}>
+  <Card title="Analysis passes" icon="search">
+    Compute information about the IR without modifying it. Examples: dominator tree, alias analysis, loop analysis. Results are cached by the `AnalysisManager` and reused by subsequent passes.
+  </Card>
+  <Card title="Transform passes" icon="wand">
+    Modify the IR to improve it: inlining, dead code elimination, loop unrolling, etc. A transform pass declares which analyses it preserves via `PreservedAnalyses`. Invalidated analyses are recomputed on demand.
+  </Card>
+</CardGroup>
+
+## New pass manager vs. legacy pass manager
+
+LLVM has two pass managers. All new development should target the new pass manager (NPM).
+
+<Tabs>
+  <Tab title="New pass manager (NPM)">
+    Introduced to replace the legacy pass manager. Uses concept-based polymorphism instead of inheritance: passes do not inherit from a base `Pass` class; they inherit from the CRTP mixin `PassInfoMixin<PassT>` and provide a `run()` method.
+
+    The NPM cleanly separates pass execution from analysis management. `AnalysisManager` objects cache results at each IR level. `PassBuilder` constructs standard optimization pipelines.
+
+    All optimization passes (`opt` pipelines, clang middle-end) use the new pass manager.
+  </Tab>
+  <Tab title="Legacy pass manager">
+    The original pass manager, where passes inherit from `ModulePass`, `FunctionPass`, `LoopPass`, etc. and register themselves with a global registry via `RegisterPass<>`.
+
+    <Note>
+      The legacy pass manager is still used in the **codegen pipeline** (instruction selection, register allocation, code emission). If you are writing a backend or a machine-level pass, you will still use the legacy pass manager. See [WritingAnLLVMPass](https://llvm.org/docs/WritingAnLLVMPass.html) for the legacy API.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Pass hierarchy in the new pass manager
+
+The IR hierarchy in the new pass manager is:
+
+```
+Module → (CGSCC →) Function → Loop
+```
+
+Each level has a corresponding pass type and analysis manager. Passes run at the level that matches their scope.
+
+| Pass type | Analysis manager | Scope |
+|-----------|-----------------|-------|
+| Module pass | `ModuleAnalysisManager` | Entire module |
+| CGSCC pass | `CGSCCAnalysisManager` | Strongly-connected component of the call graph |
+| Function pass | `FunctionAnalysisManager` | Single function |
+| Loop pass | `LoopAnalysisManager` | Single loop |
+
+A pass of a narrower scope can be adapted to run inside a broader pass manager using adaptor functions:
+
+```cpp adaptor wrappers
+FunctionPassManager FPM;
+// Wrap a loop pass to run on all loops in a function
+FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
+
+ModulePassManager MPM;
+// Wrap a function pass to run on all functions in a module
+MPM.addPass(createModuleToFunctionPassAdaptor(FunctionFooPass()));
+
+// Loop pass → function → cgscc → module
+MPM.addPass(createModuleToPostOrderCGSCCPassAdaptor(
+    createCGSCCToFunctionPassAdaptor(
+        createFunctionToLoopPassAdaptor(LoopFooPass()))));
+```
+
+A `FunctionPassManager` is itself a function pass, so it can be added to a `ModulePassManager` through the adaptor.
+
+## Writing a pass
+
+The following example is the "HelloWorld" pass from `llvm/lib/Transforms/Utils/HelloWorld.cpp`. It is an analysis-only pass that prints each function's name without modifying the IR.
+
+<Steps>
+  <Step title="Define the pass in a header">
+    Create `llvm/include/llvm/Transforms/Utils/HelloWorld.h`:
+
+    ```cpp HelloWorld.h
+    #ifndef LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+    #define LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+
+    #include "llvm/IR/PassManager.h"
+
+    namespace llvm {
+
+    class HelloWorldPass : public PassInfoMixin<HelloWorldPass> {
+    public:
+      PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+    };
+
+    } // namespace llvm
+
+    #endif // LLVM_TRANSFORMS_HELLONEW_HELLOWORLD_H
+    ```
+
+    The `run()` signature determines the pass level. A function pass takes `Function &` and `FunctionAnalysisManager &`. A module pass would take `Module &` and `ModuleAnalysisManager &`.
+  </Step>
+  <Step title="Implement the run() method">
+    Create `llvm/lib/Transforms/Utils/HelloWorld.cpp`:
+
+    ```cpp HelloWorld.cpp
+    #include "llvm/Transforms/Utils/HelloWorld.h"
+
+    using namespace llvm;
+
+    PreservedAnalyses HelloWorldPass::run(Function &F,
+                                          FunctionAnalysisManager &AM) {
+      errs() << F.getName() << "\n";
+      return PreservedAnalyses::all();
+    }
+    ```
+
+    `PreservedAnalyses::all()` tells the pass manager that this pass preserves all cached analysis results, which is correct because we did not modify the IR.
+  </Step>
+  <Step title="Register the pass">
+    Add the pass to the `FUNCTION_PASS` section of `llvm/lib/Passes/PassRegistry.def`:
+
+    ```cpp PassRegistry.def
+    FUNCTION_PASS("helloworld", HelloWorldPass())
+    ```
+
+    Then add the corresponding `#include` in `llvm/lib/Passes/PassBuilder.cpp`:
+
+    ```cpp PassBuilder.cpp
+    #include "llvm/Transforms/Utils/HelloWorld.h"
+    ```
+  </Step>
+</Steps>
+
+## Running passes with opt
+
+The `opt` tool runs passes on LLVM IR files. Use `-passes=` to specify passes by name.
+
+```bash running helloworld with opt
+$ cat /tmp/a.ll
+define i32 @foo() {
+  %a = add i32 2, 3
+  ret i32 %a
+}
+
+define void @bar() {
+  ret void
+}
+
+$ opt -disable-output /tmp/a.ll -passes=helloworld
+foo
+bar
+```
+
+For the standard `-O2` pipeline:
+
+```bash running the default O2 pipeline
+$ opt -O2 input.ll -o output.ll
+```
+
+## PassManager and AnalysisManager in code
+
+To run the default optimization pipeline programmatically:
+
+```cpp running the default O2 pipeline in C++
+// Create the analysis managers.
+// These must be declared in this order so that they are destroyed in the
+// correct order due to inter-analysis-manager references.
+LoopAnalysisManager LAM;
+FunctionAnalysisManager FAM;
+CGSCCAnalysisManager CGAM;
+ModuleAnalysisManager MAM;
+
+// Create the new pass manager builder.
+PassBuilder PB;
+
+// Register all the basic analyses with the managers.
+PB.registerModuleAnalyses(MAM);
+PB.registerCGSCCAnalyses(CGAM);
+PB.registerFunctionAnalyses(FAM);
+PB.registerLoopAnalyses(LAM);
+PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+// Create the pass manager.
+// This one corresponds to a typical -O2 optimization pipeline.
+ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O2);
+
+// Optimize the IR!
+MPM.run(MyModule, MAM);
+```
+
+The C API also supports most of this via `llvm-c/Transforms/PassBuilder.h`.
+
+## Grouping passes for cache efficiency
+
+When adding multiple passes at the same IR level, group them in a single pass manager rather than wrapping each individually:
+
+<Tabs>
+  <Tab title="Preferred — grouped">
+    ```cpp grouped passes — better cache locality
+    ModulePassManager MPM;
+
+    FunctionPassManager FPM;
+    FPM.addPass(FunctionPass1());
+    FPM.addPass(FunctionPass2());
+
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+    ```
+
+    Both passes run on the first function, then both run on the second function. Better cache locality around LLVM data structures.
+  </Tab>
+  <Tab title="Avoid — individual adaptors">
+    ```cpp individual adaptors — worse cache locality
+    ModulePassManager MPM;
+    MPM.addPass(createModuleToFunctionPassAdaptor(FunctionPass1()));
+    MPM.addPass(createModuleToFunctionPassAdaptor(FunctionPass2()));
+    ```
+
+    `FunctionPass1` runs on all functions, then `FunctionPass2` runs on all functions. This crosses the function set twice and hurts cache locality.
+  </Tab>
+</Tabs>
+
+## Injecting passes into the default pipeline
+
+Rather than building a pass manager from scratch, passes can be injected into the standard pipeline via `PassBuilder` extension points:
+
+```cpp injecting a pass at the start of the pipeline
+PassBuilder PB;
+PB.registerPipelineStartEPCallback(
+    [&](ModulePassManager &MPM, PassBuilder::OptimizationLevel Level) {
+      MPM.addPass(FooPass());
+    });
+```
+
+If a `PassBuilder` has an associated `TargetMachine`, it calls `TargetMachine::registerPassBuilderCallbacks()` to let the backend inject its own passes.
+
+## Required passes
+
+A pass that defines `static bool isRequired() { return true; }` cannot be skipped, even on functions marked `optnone`. `AlwaysInlinerPass` is an example — it must always run to preserve `alwaysinline` semantics. Pass managers are automatically required because they may contain required passes.

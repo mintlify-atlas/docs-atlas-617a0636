@@ -1,0 +1,180 @@
+---
+title: "opt — LLVM Optimizer"
+description: "Run optimization and analysis passes on LLVM IR using the modular opt tool."
+---
+
+`opt` is the modular LLVM optimizer and analyzer. It reads LLVM IR (`.ll`) or bitcode (`.bc`), runs the passes you specify, and writes the transformed result. You can use it to experiment with individual passes, benchmark pipelines, run analyses, and test pass correctness with FileCheck.
+
+## Basic usage
+
+```bash
+opt [options] input.ll -o output.ll
+```
+
+Read from stdin and write bitcode to stdout:
+
+```bash
+opt -passes=mem2reg < input.ll > output.bc
+```
+
+Read a bitcode file and emit text IR:
+
+```bash
+opt -S -passes=instcombine input.bc -o output.ll
+```
+
+## Key flags
+
+| Flag | Description |
+|------|-------------|
+| `-passes=<pipeline>` | Comma-separated pass pipeline to run (new pass manager syntax). |
+| `-O0` / `-O1` / `-O2` / `-O3` | Run a standard optimization pipeline at the given level. |
+| `-Os` | Optimize for code size (like `-O2` but favors smaller output). |
+| `-Oz` | Optimize aggressively for code size. |
+| `-S` | Emit LLVM text IR (`.ll`) instead of bitcode. |
+| `-o <file>` | Write output to `<file>`. Defaults to stdout. |
+| `-print-passes` | List all available passes and exit. |
+| `-disable-output` | Run passes but discard output (useful for analysis-only runs). |
+| `-stats` | Print statistics collected by passes. |
+| `-time-passes` | Print per-pass timing to stderr. |
+| `--load-pass-plugin=<path>` | Load an external pass plugin (`.so` / `.dylib`). |
+| `-verify-each` | Insert a verifier pass after every pass (helps isolate bugs). |
+| `-debug` | Enable `LLVM_DEBUG()` output (debug builds only). |
+
+<Note>
+`-passes=` uses the new pass manager syntax. Older code may reference `-enable-new-pm=0` and legacy pass names — those are no longer supported in recent LLVM versions.
+</Note>
+
+## Examples
+
+<CodeGroup>
+
+```bash run mem2reg
+# Promote allocas to SSA registers
+opt -S -passes=mem2reg input.ll -o output.ll
+```
+
+```bash run O2 pipeline
+# Run the full -O2 optimization pipeline
+opt -S -O2 input.ll -o output.ll
+```
+
+```bash chain multiple passes
+# Run SROA, then instruction combining, then dead code elimination
+opt -S -passes="sroa,instcombine,adce" input.ll -o output.ll
+```
+
+```bash analysis only
+# Run constant propagation but throw away the output
+opt -passes=sccp -disable-output input.ll
+```
+
+```bash load external plugin
+# Load a plugin and run its registered pass
+opt --load-pass-plugin=./MyPass.so -passes=my-pass -S input.ll -o output.ll
+```
+
+</CodeGroup>
+
+## Pass pipeline syntax
+
+The `-passes=` argument accepts a comma-separated list of pass names. You can wrap passes in explicit pipeline stages using `function(...)`, `module(...)`, or `cgscc(...)`:
+
+```bash
+# Run instcombine at function scope, then inlining at module scope
+opt -passes="function(instcombine),inline" -S input.ll -o output.ll
+```
+
+Standard optimization pipelines are available as shorthand:
+
+```bash
+opt -O2 -S input.ll -o output.ll
+```
+
+This runs the same passes that `clang -O2` would use after lowering to IR.
+
+## Listing available passes
+
+Use `-print-passes` to see every pass that `opt` knows about:
+
+```bash
+opt -print-passes
+```
+
+The output is grouped by pass type (module, function, loop, CGSCC, etc.) and includes brief descriptions.
+
+To see passes provided by an external plugin:
+
+```bash
+opt --load-pass-plugin=./MyPass.so -print-passes
+```
+
+## Timing and statistics
+
+<Tabs>
+  <Tab title="Timing">
+    ```bash
+    opt -S -O2 -time-passes input.ll -o output.ll
+    ```
+
+    Prints a table to stderr with the wall-clock and user time spent in each pass. Useful for identifying expensive passes in a pipeline.
+  </Tab>
+  <Tab title="Statistics">
+    ```bash
+    opt -S -passes=instcombine -stats input.ll -o output.ll
+    ```
+
+    Prints counters that passes increment via `++Statistic`. For example, `instcombine` reports how many instructions it simplified.
+  </Tab>
+</Tabs>
+
+## Using opt with FileCheck
+
+`opt` is commonly used in LLVM's test suite with FileCheck to verify that passes produce specific IR output:
+
+```llvm
+; RUN: opt -S -passes=mem2reg %s | FileCheck %s
+
+define i32 @example() {
+entry:
+  %x = alloca i32
+  store i32 42, ptr %x
+  %val = load i32, ptr %x
+  ret i32 %val
+}
+
+; CHECK-LABEL: define i32 @example
+; CHECK-NOT: alloca
+; CHECK: ret i32 42
+```
+
+Run the test with:
+
+```bash
+llvm-lit test.ll
+# or directly:
+opt -S -passes=mem2reg test.ll | FileCheck test.ll
+```
+
+<Tip>
+Use `-verify-each` when writing pass tests to catch IR verification failures immediately after the offending pass runs.
+</Tip>
+
+## Common pass names
+
+The following are frequently used with `-passes=`:
+
+| Pass name | What it does |
+|-----------|--------------|
+| `mem2reg` | Promote `alloca`s to SSA registers (prerequisite for most other passes). |
+| `instcombine` | Combine redundant instructions into simpler forms. |
+| `sroa` | Scalar replacement of aggregates — splits structs/arrays into scalars. |
+| `inline` | Inline function calls based on a cost model. |
+| `adce` | Aggressive dead code elimination. |
+| `sccp` | Sparse conditional constant propagation. |
+| `loop-unroll` | Unroll loops with constant trip counts. |
+| `gvn` | Global value numbering — eliminates redundant loads and computations. |
+| `simplifycfg` | Simplify the control flow graph (merge blocks, remove unreachable code). |
+| `licm` | Loop-invariant code motion — hoists invariant computations out of loops. |
+
+Use `opt -print-passes` for the full list.

@@ -1,0 +1,568 @@
+---
+title: "LLVM Language Reference"
+description: "Reference manual for LLVM IR: identifiers, types, instructions, global variables, and function definitions."
+---
+
+LLVM IR is a Static Single Assignment (SSA) based intermediate representation that provides type safety, low-level operations, and flexibility to represent high-level languages. It is the common code representation used throughout all phases of the LLVM compilation strategy.
+
+## Three forms of LLVM IR
+
+LLVM IR exists in three equivalent forms:
+
+<CardGroup cols={3}>
+  <Card title="In-memory IR" icon="cpu">
+    The internal data structure used by the compiler during transformations and analyses.
+  </Card>
+  <Card title="Bitcode (.bc)" icon="file-binary">
+    An on-disk binary encoding suitable for fast loading by a Just-In-Time compiler or for LTO.
+  </Card>
+  <Card title="Text assembly (.ll)" icon="file-code">
+    A human-readable representation for debugging and visualization.
+  </Card>
+</CardGroup>
+
+Use `llvm-as` to assemble text IR to bitcode and `llvm-dis` to disassemble bitcode back to text:
+
+```bash
+llvm-as input.ll -o output.bc
+llvm-dis input.bc -o output.ll
+```
+
+## Identifiers
+
+LLVM identifiers come in two basic types: global and local.
+
+| Prefix | Scope | Examples |
+|--------|-------|---------|
+| `@` | Global (functions, global variables) | `@main`, `@DivisionByZero` |
+| `%` | Local (register names, types) | `%foo`, `%result`, `%42` |
+
+There are three identifier formats:
+
+- **Named**: a string with its prefix — `%foo`, `@puts`, `%a.really.long.identifier`
+- **Unnamed**: an unsigned numeric value with prefix — `%12`, `@2`, `%44`
+- **Constants**: literal constant values
+
+Unnamed temporaries are numbered sequentially per function, starting from 0. Basic blocks and unnamed function parameters count in this numbering.
+
+```llvm
+; Named identifiers
+%result = mul i32 %X, 8
+
+; Unnamed temporaries
+%0 = add i32 %X, %X     ; yields i32:%0
+%1 = add i32 %0, %0     ; yields i32:%1
+%2 = add i32 %1, %1     ; yields i32:%2
+```
+
+Comments start with `;` and extend to end of line. Block comments use `/* ... */`.
+
+<Note>
+Reserved words (opcodes like `add`, `ret`; type names like `void`, `i32`) cannot conflict with variable names because none of them begin with `%` or `@`.
+</Note>
+
+## Module structure
+
+An LLVM program is composed of modules, each a translation unit. A module consists of functions, global variables, and symbol table entries. Here is a complete "hello world" module:
+
+```llvm
+; Declare the string constant as a global constant.
+@.str = private unnamed_addr constant [13 x i8] c"hello world\0A\00"
+
+; External declaration of the puts function
+declare i32 @puts(ptr captures(none)) nounwind
+
+; Definition of main function
+define i32 @main() {
+  call i32 @puts(ptr @.str)
+  ret i32 0
+}
+
+; Named metadata
+!0 = !{i32 42, null, !"string"}
+!foo = !{!0}
+```
+
+## Global variables
+
+Global variables define regions of memory allocated at compilation time rather than at runtime. They are accessed through pointers.
+
+```llvm
+@<GlobalVarName> = [Linkage] [Visibility]
+                   <global | constant> <Type> [<InitializerConstant>]
+                   [, section "name"] [, align <Alignment>]
+```
+
+<CodeGroup>
+
+```llvm definitions
+; Mutable global variable
+@counter = global i32 0
+
+; Immutable global constant
+@pi = constant double 3.14159265358979
+
+; External declaration
+@G = external global i32
+
+; Private unnamed constant string
+@.str = private unnamed_addr constant [6 x i8] c"hello\00"
+
+; Specific address space and alignment
+@G = addrspace(5) constant float 1.0, section "foo", align 4
+```
+
+```llvm linkage types
+; private: only accessible within this module
+@priv = private global i32 0
+
+; internal: visible as a local symbol (like C static)
+@stat = internal global i32 0
+
+; external: visible to other modules (default)
+@ext = external global i32
+
+; weak: may be overridden
+@weak_sym = weak global i32 0
+```
+
+</CodeGroup>
+
+A variable declared `constant` can never be modified, which enables the compiler to place it in a read-only section.
+
+## Functions
+
+### Definitions
+
+```llvm
+define [linkage] <ResultType> @<FunctionName>([argument list])
+       [fn Attrs] [section "name"] [align N] { ... }
+```
+
+A function definition contains a list of basic blocks forming the control flow graph (CFG). Each basic block ends with a terminator instruction (such as `ret` or `br`). The first basic block is the entry block and cannot have predecessors.
+
+```llvm
+define i32 @add(i32 %a, i32 %b) {
+entry:
+  %result = add i32 %a, %b
+  ret i32 %result
+}
+```
+
+### Declarations
+
+```llvm
+declare [linkage] <ResultType> @<FunctionName>([argument list])
+```
+
+Declarations reference functions defined elsewhere:
+
+```llvm
+declare i32 @printf(ptr, ...) nounwind
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
+```
+
+## Type system
+
+The LLVM type system enables optimizations to be performed directly on the IR. Strong typing makes generated code readable and enables novel analyses.
+
+### Integer types
+
+Integer types are written as `iN` where `N` is the bit width — any value from 1 to 2²³ (about 8 million bits).
+
+| Type | Description |
+|------|-------------|
+| `i1` | Single-bit integer (boolean) |
+| `i8` | 8-bit integer |
+| `i16` | 16-bit integer |
+| `i32` | 32-bit integer |
+| `i64` | 64-bit integer |
+| `i128` | 128-bit integer |
+| `i1942652` | Arbitrary-width example |
+
+LLVM integers use two's complement representation. `add`, `sub`, and `mul` work correctly for both signed and unsigned interpretations of the same bit pattern.
+
+### Floating-point types
+
+| Type | Description |
+|------|-------------|
+| `half` | 16-bit IEEE 754 binary16 |
+| `bfloat` | 16-bit "brain" float (7-bit significand, same exponent range as `float`) |
+| `float` | 32-bit IEEE 754 binary32 |
+| `double` | 64-bit IEEE 754 binary64 |
+| `fp128` | 128-bit IEEE 754 binary128 |
+| `x86_fp80` | 80-bit x87 extended precision |
+| `ppc_fp128` | 128-bit PowerPC double-double |
+
+### Pointer types
+
+Since LLVM 15, pointers are opaque: `ptr`. They do not carry a pointee type.
+
+```llvm
+ptr               ; pointer in default address space 0
+ptr addrspace(5)  ; pointer in address space 5
+```
+
+<Info>
+Before LLVM 15, typed pointers such as `i32*` or `[4 x i32]*` were used. Opaque pointers are now the default and recommended form.
+</Info>
+
+### Array types
+
+Arrays arrange elements sequentially in memory. Syntax: `[N x T]`
+
+```llvm
+[40 x i32]              ; 40 32-bit integers
+[4 x i8]                ; 4 bytes
+[3 x [4 x i32]]         ; 3×4 two-dimensional array
+[12 x [10 x float]]     ; 12×10 array of floats
+```
+
+### Structure types
+
+Structures collect data members of different types. Padding is inserted between fields according to the data layout.
+
+```llvm
+%T1 = type { <type list> }     ; normal struct
+%T2 = type <{ <type list> }>   ; packed struct (no padding)
+```
+
+Examples:
+
+```llvm
+{ i32, i32, i32 }   ; three i32 values
+{ float, ptr }      ; a float and a pointer
+<{ i8, i32 }>       ; packed — exactly 5 bytes
+
+; Named struct
+%struct.Point = type { double, double }
+```
+
+Structures in memory are accessed by obtaining a pointer to a field with `getelementptr`, then using `load`/`store`.
+
+### Vector types
+
+Vectors represent SIMD data — multiple values operated on in parallel by a single instruction.
+
+```llvm
+<N x T>              ; fixed-length vector of N elements of type T
+<vscale x N x T>     ; scalable vector
+```
+
+Examples:
+
+```llvm
+<4 x i32>            ; 4 32-bit integers
+<8 x float>          ; 8 single-precision floats
+<2 x i64>            ; 2 64-bit integers
+<4 x ptr>            ; 4 pointers
+<vscale x 4 x i32>   ; scalable: a multiple of 4 i32 values
+```
+
+### Function types
+
+A function type is a return type followed by a parameter list:
+
+```llvm
+i32 (i32)              ; takes i32, returns i32
+i32 (ptr, ...)         ; vararg: takes at least one ptr, returns i32 (printf signature)
+{i32, i32} (i32)       ; returns a struct of two i32 values
+void ()                ; no parameters, no return value
+```
+
+## Instruction reference
+
+### Terminator instructions
+
+Terminators end every basic block and transfer control flow.
+
+<AccordionGroup>
+  <Accordion title="ret — return from function">
+
+```llvm
+ret <type> <value>   ; return a value
+ret void             ; return from void function
+```
+
+Examples:
+
+```llvm
+ret i32 5                        ; return the integer 5
+ret void                         ; return from a void function
+ret { i32, i8 } { i32 4, i8 2 } ; return a struct
+```
+
+  </Accordion>
+  <Accordion title="br — branch">
+
+```llvm
+br i1 <cond>, label <iftrue>, label <iffalse>  ; conditional branch
+br label <dest>                                 ; unconditional branch
+```
+
+Examples:
+
+```llvm
+Test:
+  %cond = icmp eq i32 %a, %b
+  br i1 %cond, label %IfEqual, label %IfUnequal
+IfEqual:
+  ret i32 1
+IfUnequal:
+  ret i32 0
+```
+
+  </Accordion>
+  <Accordion title="switch — multi-way branch">
+
+```llvm
+switch <intty> <value>, label <defaultdest> [ <intty> <val>, label <dest> ... ]
+```
+
+Example:
+
+```llvm
+; Jump table with three cases
+switch i32 %val, label %otherwise [ i32 0, label %onzero
+                                    i32 1, label %onone
+                                    i32 2, label %ontwo ]
+```
+
+  </Accordion>
+</AccordionGroup>
+
+### Arithmetic instructions
+
+<Tabs>
+  <Tab title="Integer">
+
+```llvm
+<result> = add <ty> <op1>, <op2>       ; addition
+<result> = sub <ty> <op1>, <op2>       ; subtraction
+<result> = mul <ty> <op1>, <op2>       ; multiplication
+<result> = udiv <ty> <op1>, <op2>      ; unsigned division
+<result> = sdiv <ty> <op1>, <op2>      ; signed division
+<result> = urem <ty> <op1>, <op2>      ; unsigned remainder
+<result> = srem <ty> <op1>, <op2>      ; signed remainder
+<result> = shl <ty> <op1>, <op2>       ; shift left
+<result> = lshr <ty> <op1>, <op2>      ; logical shift right
+<result> = ashr <ty> <op1>, <op2>      ; arithmetic shift right
+<result> = and <ty> <op1>, <op2>       ; bitwise and
+<result> = or <ty> <op1>, <op2>        ; bitwise or
+<result> = xor <ty> <op1>, <op2>       ; bitwise xor
+```
+
+`add`, `sub`, and `mul` accept optional `nuw` (no unsigned wrap) and `nsw` (no signed wrap) flags. If the specified overflow occurs, the result is a poison value:
+
+```llvm
+%r = add nuw nsw i32 %x, %y    ; poison if signed or unsigned overflow
+%s = mul nsw i32 4, %var       ; yields i32:result = 4 * %var
+```
+
+  </Tab>
+  <Tab title="Floating-point">
+
+```llvm
+<result> = fadd [fast-math flags]* <ty> <op1>, <op2>   ; fp add
+<result> = fsub [fast-math flags]* <ty> <op1>, <op2>   ; fp sub
+<result> = fmul [fast-math flags]* <ty> <op1>, <op2>   ; fp multiply
+<result> = fdiv [fast-math flags]* <ty> <op1>, <op2>   ; fp divide
+<result> = frem [fast-math flags]* <ty> <op1>, <op2>   ; fp remainder
+<result> = fneg [fast-math flags]* <ty> <op1>          ; fp negate
+```
+
+Fast-math flags (`fast`, `nnan`, `ninf`, `nsz`, `arcp`, `contract`, `afn`, `reassoc`) are optimization hints that allow otherwise-unsafe FP transformations:
+
+```llvm
+%r = fadd float 4.0, %var         ; yields float:result = 4.0 + %var
+%r = fadd fast float %a, %b       ; all fast-math flags enabled
+```
+
+  </Tab>
+</Tabs>
+
+### Memory instructions
+
+<AccordionGroup>
+  <Accordion title="alloca — allocate stack memory">
+
+Allocates memory on the current function's stack frame, automatically freed when the function returns.
+
+```llvm
+<result> = alloca <type> [, <ty> <NumElements>] [, align <alignment>]
+```
+
+```llvm
+%ptr = alloca i32                      ; yields ptr to one i32
+%ptr = alloca i32, i32 4               ; yields ptr to array of 4 i32
+%ptr = alloca i32, i32 4, align 1024   ; with alignment
+```
+
+  </Accordion>
+  <Accordion title="load — read from memory">
+
+```llvm
+<result> = load <ty>, ptr <pointer> [, align <alignment>]
+<result> = load volatile <ty>, ptr <pointer>
+```
+
+```llvm
+%ptr = alloca i32
+store i32 3, ptr %ptr
+%val = load i32, ptr %ptr      ; yields i32:val = 3
+```
+
+  </Accordion>
+  <Accordion title="store — write to memory">
+
+```llvm
+store <ty> <value>, ptr <pointer> [, align <alignment>]  ; yields void
+store volatile <ty> <value>, ptr <pointer>
+```
+
+```llvm
+%ptr = alloca i32
+store i32 3, ptr %ptr          ; writes 3 to the allocated slot
+```
+
+  </Accordion>
+  <Accordion title="getelementptr — address calculation">
+
+`getelementptr` (GEP) computes the address of a subelement of an aggregate. It performs address arithmetic only — it does not access memory.
+
+```llvm
+<result> = getelementptr <ty>, ptr <ptrval> {, <ty> <idx>}*
+<result> = getelementptr inbounds <ty>, ptr <ptrval> {, <ty> <idx>}*
+```
+
+Example with nested structs (C `&s[1].Z.B[5][13]`):
+
+```llvm
+%struct.RT = type { i8, [10 x [20 x i32]], i8 }
+%struct.ST = type { i32, double, %struct.RT }
+
+define ptr @foo(ptr %s) {
+entry:
+  %arrayidx = getelementptr inbounds %struct.ST, ptr %s, i64 1, i32 2, i32 1, i64 5, i64 13
+  ret ptr %arrayidx
+}
+```
+
+The `inbounds` flag asserts that the resulting pointer stays within the bounds of the allocated object; violations produce a poison value.
+
+  </Accordion>
+</AccordionGroup>
+
+### Conversion instructions
+
+| Instruction | Description |
+|-------------|-------------|
+| `trunc <ty> <val> to <ty2>` | Truncate integer to a narrower type (drops high bits) |
+| `zext <ty> <val> to <ty2>` | Zero-extend integer to a wider type |
+| `sext <ty> <val> to <ty2>` | Sign-extend integer to a wider type |
+| `fptrunc <ty> <val> to <ty2>` | Truncate floating-point to a narrower FP type |
+| `fpext <ty> <val> to <ty2>` | Extend floating-point to a wider FP type |
+| `fptoui <ty> <val> to <ty2>` | Convert FP to unsigned integer |
+| `fptosi <ty> <val> to <ty2>` | Convert FP to signed integer |
+| `uitofp <ty> <val> to <ty2>` | Convert unsigned integer to FP |
+| `sitofp <ty> <val> to <ty2>` | Convert signed integer to FP |
+| `ptrtoint <ty> <val> to <ty2>` | Convert pointer to integer |
+| `inttoptr <ty> <val> to <ty2>` | Convert integer to pointer |
+| `bitcast <ty> <val> to <ty2>` | Reinterpret bits as a different type (no-op cast) |
+
+```llvm
+%X = trunc i32 257 to i8              ; yields i8:1 (drops upper bits)
+%Y = zext i32 257 to i64              ; yields i64:257
+%Z = sext i8 -1 to i16               ; yields i16:65535
+%W = bitcast i32 %val to float        ; reinterpret 32 bits as float
+```
+
+### Comparison instructions
+
+#### icmp — integer comparison
+
+```llvm
+<result> = icmp <cond> <ty> <op1>, <op2>   ; yields i1 or <N x i1>
+```
+
+Condition codes:
+
+| Code | Meaning |
+|------|---------|
+| `eq` | equal |
+| `ne` | not equal |
+| `ugt` | unsigned greater than |
+| `uge` | unsigned greater or equal |
+| `ult` | unsigned less than |
+| `ule` | unsigned less or equal |
+| `sgt` | signed greater than |
+| `sge` | signed greater or equal |
+| `slt` | signed less than |
+| `sle` | signed less or equal |
+
+```llvm
+%r1 = icmp eq i32 4, 5       ; yields: false
+%r2 = icmp ult i16 4, 5      ; yields: true
+%r3 = icmp sgt i16 4, 5      ; yields: false
+%r4 = icmp ne ptr %X, %X     ; yields: false
+```
+
+#### fcmp — floating-point comparison
+
+```llvm
+<result> = fcmp [fast-math flags]* <cond> <ty> <op1>, <op2>
+```
+
+*Ordered* conditions (`o` prefix) yield false if either operand is NaN. *Unordered* conditions (`u` prefix) yield true if either operand is NaN.
+
+| Code | Meaning |
+|------|---------|
+| `oeq` | ordered and equal |
+| `ogt` | ordered and greater than |
+| `oge` | ordered and greater than or equal |
+| `olt` | ordered and less than |
+| `ole` | ordered and less than or equal |
+| `one` | ordered and not equal |
+| `ord` | ordered (neither operand is NaN) |
+| `ueq` | unordered or equal |
+| `ugt` | unordered or greater than |
+| `ult` | unordered or less than |
+| `une` | unordered or not equal |
+| `uno` | unordered (either operand is NaN) |
+| `true` | always true |
+| `false` | always false |
+
+```llvm
+%r1 = fcmp oeq float 4.0, 5.0    ; false
+%r2 = fcmp olt float 4.0, 5.0    ; true
+%r3 = fcmp une double 1.0, 2.0   ; true
+```
+
+### PHI nodes
+
+The `phi` instruction implements the φ node in SSA form. It must appear at the start of a basic block (before any non-phi instructions) and selects a value based on which predecessor block transferred control.
+
+```llvm
+<result> = phi <ty> [ <val0>, <label0>], [ <val1>, <label1>], ...
+```
+
+```llvm
+Loop:   ; Count from 0 upward
+  %indvar = phi i32 [ 0, %LoopHeader ], [ %nextindvar, %Loop ]
+  %nextindvar = add i32 %indvar, 1
+  br label %Loop
+```
+
+<Tip>
+PHI nodes are what makes SSA form work: instead of mutating a variable across branches, you merge values at the convergence point using `phi`.
+</Tip>
+
+## Well-formedness
+
+LLVM IR has a verifier pass that checks well-formedness beyond syntactic correctness. For example, this is syntactically valid but not well-formed because the use of `%x` does not dominate its definition:
+
+```llvm
+%x = add i32 1, %x     ; not well-formed: %x used before defined
+```
+
+The verifier runs automatically after parsing and before bitcode emission. Violations indicate bugs in transformation passes or malformed input.

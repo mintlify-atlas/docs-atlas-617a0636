@@ -1,0 +1,270 @@
+---
+title: "Coding standards"
+description: "C++ style, naming conventions, formatting rules, and LLVM-specific idioms used throughout the LLVM codebase."
+---
+
+This document describes the coding standards used in the LLVM project. No coding standard should be treated as an absolute requirement in every situation, but standards are particularly important for large-scale, library-based codebases like LLVM.
+
+**The golden rule:** if you are extending, enhancing, or fixing existing code, use the style already present in that code so the source remains uniform and easy to follow.
+
+## Language standard
+
+LLVM subprojects are written in standard **C++17** and avoid unnecessary vendor-specific extensions. Features used must be available in all supported host compilers (Clang, GCC, and MSVC). See the [Getting Started page](https://llvm.org/docs/GettingStarted.html) for the current minimum compiler versions.
+
+For automation, build systems, and utility scripts, Python is preferred and widely used in the repository. Python code must follow [PEP 8](https://peps.python.org/pep-0008/) and should be automatically formatted with [black](https://github.com/psf/black) version 23.x. When contributing a patch unrelated to formatting, use [darker](https://pypi.org/project/darker/) to format only the modified Python code.
+
+```bash
+pip install black=='23.*' darker  # install black 23.x and darker
+darker test.py                    # format uncommitted changes
+darker -r HEAD^ test.py           # also format changes from last commit
+black test.py                     # format entire file
+```
+
+## LLVM data structures over STL
+
+Instead of implementing custom data structures, prefer the C++ standard library or LLVM support libraries. When both provide similar functionality, prefer the LLVM library:
+
+| STL type | Preferred LLVM alternative |
+|---|---|
+| `std::vector<T>` | `llvm::SmallVector<T, N>` |
+| `std::map<K, V>` / `std::unordered_map<K, V>` | `llvm::DenseMap<K, V>` |
+| `std::string` (for reading) | `llvm::StringRef` |
+| `std::span<T>` (for reading) | `llvm::ArrayRef<T>` |
+| `std::ostream` | `llvm::raw_ostream` |
+
+LLVM support libraries such as [ADT](https://github.com/llvm/llvm-project/tree/main/llvm/include/llvm/ADT) implement specialized data structures or functionality missing from the standard library. They live in the `llvm` namespace and follow standard interfaces where one exists.
+
+`#include <iostream>` in library files is **forbidden** — many implementations inject a static constructor into every translation unit that includes it. Use `raw_ostream` instead.
+
+## Formatting
+
+### Column width
+
+Write code to fit within **80 columns**. This allows developers to view multiple files side-by-side on a modest display and is consistent with many other large projects.
+
+### Indentation and whitespace
+
+- Use **spaces**, not tabs.
+- Prefer **2-space indentation** for blocks.
+- Do not add trailing whitespace.
+
+### Automated formatting
+
+All C++ patches must be formatted with `clang-format` before submission. Use `git-clang-format` to format only the lines your patch changes:
+
+```bash
+git clang-format HEAD~1
+```
+
+See the [How to contribute](/contributing/how-to-contribute) page for details on integrating `clang-format` into your workflow.
+
+### Lambda formatting
+
+Format multi-line lambdas like blocks of code. When a single multi-line lambda is the last argument, drop the indent to two spaces as if it were an `if`-block:
+
+```cpp
+std::sort(foo.begin(), foo.end(), [&](Foo a, Foo b) -> bool {
+  if (a.blah < b.blah)
+    return true;
+  if (a.baz < b.baz)
+    return true;
+  return a.bam < b.bam;
+});
+```
+
+## Naming conventions
+
+Names should be in **camel case**. The specific casing rule depends on the kind of declaration:
+
+| Kind | Convention | Examples |
+|---|---|---|
+| Types (classes, structs, enums, typedefs) | `UpperCamelCase` | `TextFileReader`, `ValueKind` |
+| Variables | `UpperCamelCase` | `Leader`, `Boats` |
+| Functions and methods | `lowerCamelCase` | `openFile()`, `isFoo()` |
+| Enumerators and public member variables | `UpperCamelCase`, prefixed with enum name | `VK_Argument`, `VK_BasicBlock` |
+
+Classes that mimic STL interfaces may use lowercase names with underscores (e.g., `begin()`, `push_back()`, `empty()`).
+
+```cpp
+class VehicleMaker {
+  Factory<Tire> TireFactory;  // Descriptive name
+};
+
+Vehicle makeVehicle(VehicleType Type) {
+  Light Headlight = M.makeLight("head");  // Good: descriptive variable name
+}
+```
+
+## Include ordering
+
+List `#include` directives in this order, with each group sorted lexicographically:
+
+1. **Main module header** — the `.h` file corresponding to the `.cpp` being compiled (always first)
+2. **Local/private headers**
+3. **LLVM project/subproject headers** (`clang/...`, `lldb/...`, `llvm/...`, etc.), from most specific to least specific
+4. **System headers**
+
+Keeping the main module header first ensures it has no hidden dependencies.
+
+## Documentation comments
+
+Use Doxygen-style comments (`///`) for all public interfaces. The first sentence is used as the abstract. Put detailed discussion in separate paragraphs.
+
+```cpp
+/// Sets the xyzzy property to \p Baz.
+void setXyzzy(bool Baz);
+```
+
+A full example using available Doxygen features:
+
+```cpp
+/// Does foo and bar.
+///
+/// Does not do foo the usual way if \p Baz is true.
+///
+/// Typical usage:
+/// \code
+///   fooBar(false, "quux", Res);
+/// \endcode
+///
+/// \param Quux kind of foo to do.
+/// \param [out] Result filled with bar sequence on foo success.
+///
+/// \returns true on success.
+bool fooBar(bool Baz, StringRef Quux, std::vector<int> &Result);
+```
+
+Put documentation comments for public APIs in the header file. Do not duplicate comments between the header and the implementation file. Do not restate the function or class name at the start of the comment.
+
+### File headers
+
+Every source file must begin with a standard license header followed by a `///` Doxygen comment describing the file's purpose:
+
+```cpp
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+///
+/// \file
+/// This file contains the declaration of the Instruction class, which is the
+/// base class for all of the VM instructions.
+///
+//===----------------------------------------------------------------------===//
+```
+
+### Header guards
+
+Header guards must be the all-caps include path with `/` and `.` replaced by `_`. For example, `llvm/include/llvm/Analysis/Utils/Local.h` uses:
+
+```cpp
+#ifndef LLVM_ANALYSIS_UTILS_LOCAL_H
+#define LLVM_ANALYSIS_UTILS_LOCAL_H
+// ...
+#endif // LLVM_ANALYSIS_UTILS_LOCAL_H
+```
+
+## Assert usage
+
+Use `assert()` liberally to check preconditions and assumptions. Always include a descriptive message:
+
+```cpp
+inline Value *getOperand(unsigned I) {
+  assert(I < Operands.size() && "getOperand() out of range!");
+  return Operands[I];
+}
+```
+
+For code paths that should never be reached, use `llvm_unreachable` instead of `assert(false)`:
+
+```cpp
+llvm_unreachable("Invalid radix for integer literal");
+```
+
+In release builds, `llvm_unreachable` becomes a compiler hint to skip code generation for that branch. `assert(false)` does not reliably communicate this intent.
+
+If an error condition can be triggered by user input, use the recoverable error mechanism (`llvm::Error` and `llvm::Expected<T>`) instead of assertions.
+
+<Warning>
+Values used only inside `assert()` will produce "unused value" warnings in release builds. Move the call inside the `assert`, or use `[[maybe_unused]]` for values with required side effects:
+
+```cpp
+// Move the call inside assert:
+assert(V.size() > 42 && "Vector smaller than it should be");
+
+// Use [[maybe_unused]] when side effects must still occur:
+[[maybe_unused]] bool NewToSet = Myset.insert(Value);
+assert(NewToSet && "The value shouldn't be in the set yet");
+```
+</Warning>
+
+## Error handling
+
+LLVM does not use C++ exceptions. Use `llvm::Error` and `llvm::Expected<T>` for recoverable error handling. See the [Programmer's Manual](https://llvm.org/docs/ProgrammersManual.html) for details.
+
+## Avoid RTTI; use `isa<>`, `cast<>`, `dyn_cast<>`
+
+LLVM does not use C++ RTTI (e.g., `dynamic_cast<>`) to keep code and executable size down. Instead, LLVM provides a hand-rolled, opt-in form of RTTI using templates:
+
+```cpp
+// Instead of dynamic_cast:
+if (auto *PN = dyn_cast<PHINode>(V)) {
+  // use PN
+}
+
+// Unconditional downcast (asserts on failure):
+PHINode *PN = cast<PHINode>(V);
+
+// Type check only:
+if (isa<PHINode>(V)) { ... }
+```
+
+These utilities can be [added to any class](https://llvm.org/docs/HowToSetUpLLVMStyleRTTI.html).
+
+## Pointer and reference conventions
+
+- Use `auto &` for values and `auto *` for pointers in range-based `for` loops unless you need a copy.
+- Prefer C++-style casts (`static_cast`, `reinterpret_cast`, `const_cast`) over C-style casts, except when casting to `void` to suppress unused-variable warnings.
+- Do not add static constructors or destructors — they negatively affect library link-in time and initialization order.
+
+```cpp
+// Prefer references, avoid unnecessary copies:
+for (const auto &Val : Container) observe(Val);
+for (auto &Val : Container) Val.change();
+
+// Make pointer iteration explicit:
+for (const auto *Ptr : Container) observe(*Ptr);
+```
+
+## Code structure best practices
+
+### Use early exits
+
+Reduce nesting by returning or continuing early rather than wrapping large blocks in `if` conditions:
+
+```cpp
+Value *doSomething(Instruction *I) {
+  if (I->isTerminator())
+    return 0;
+
+  if (!I->hasOneUse())
+    return 0;
+
+  // ... main logic ...
+}
+```
+
+### Do not use `else` after a `return`
+
+After a `return`, `break`, `continue`, or `goto`, omit the `else` branch to reduce indentation.
+
+### Do not use `using namespace std`
+
+Explicitly prefix standard library identifiers with `std::`. This keeps the code clear and portable. In `.cpp` files that implement code in a specific namespace (e.g., `llvm`), a `using namespace llvm;` directive at the top is acceptable and reduces indentation.
+
+### Treat compiler warnings as errors
+
+Suppress compiler warnings with small code changes rather than ignoring them. LLVM builds with a high warning level and treats many warnings as errors.

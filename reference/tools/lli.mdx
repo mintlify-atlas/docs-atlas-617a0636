@@ -1,0 +1,186 @@
+---
+title: "lli — LLVM Interpreter and JIT"
+description: "Directly execute LLVM bitcode or IR using the ORC JIT compiler or the built-in interpreter."
+---
+
+`lli` directly executes programs in LLVM bitcode format. It supports two execution modes: a just-in-time (JIT) compiler that compiles and runs IR on the host machine, and a slow bytecode interpreter for cases where JIT is unavailable or unwanted.
+
+<Warning>
+`lli` is **not** an emulator. It can only execute IR targeting the host architecture. Passing IR compiled for a different architecture will crash or produce incorrect results.
+</Warning>
+
+## Basic usage
+
+```bash
+lli [options] input.bc [program-args...]
+```
+
+`lli` accepts both LLVM bitcode (`.bc`) and text IR (`.ll`). Arguments after the input file are passed as `argv` to the program being executed.
+
+```bash
+# Run a bitcode file
+lli program.bc
+
+# Pass arguments to the program
+lli program.bc arg1 arg2
+
+# Read bitcode from stdin
+lli - < program.bc
+```
+
+## Execution modes
+
+`lli` has two modes of execution:
+
+<Tabs>
+  <Tab title="ORC JIT (default)">
+    By default, `lli` uses the ORC JIT engine. It compiles IR to native machine code at runtime and executes it. This is fast and supports most IR features.
+
+    ```bash
+    lli program.bc
+    ```
+
+    You can explicitly select ORC JIT with:
+
+    ```bash
+    lli -jit-kind=orc program.bc
+    ```
+  </Tab>
+  <Tab title="Interpreter">
+    The interpreter evaluates LLVM IR instructions directly without compiling to native code. It is significantly slower but can be useful for debugging or on architectures without JIT support.
+
+    ```bash
+    lli -force-interpreter=true program.bc
+    ```
+
+    <Note>
+    The interpreter does not support all IR features. Some operations (such as inline assembly or certain intrinsics) will fail at runtime.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Key flags
+
+| Flag | Description |
+|------|-------------|
+| `-force-interpreter=true` | Use the interpreter instead of the JIT. |
+| `-jit-kind=orc` | Explicitly select the ORC JIT engine. |
+| `-O0` / `-O1` / `-O2` / `-O3` | Optimization level applied by the JIT when generating native code. |
+| `-march=<arch>` | Override target architecture for JIT code generation. |
+| `-mcpu=<cpu>` | Target a specific CPU model. |
+| `-mattr=<features>` | Enable or disable CPU features (e.g. `+avx2,-sse4.2`). |
+| `-mtriple=<triple>` | Override the target triple from the input file. |
+| `--extra-module=<file.bc>` | Load an additional bitcode module alongside the main program. |
+| `-fake-argv0=<name>` | Override `argv[0]` seen by the program. |
+| `-stats` | Print JIT code-generation statistics. |
+| `-time-passes` | Print per-pass timing for JIT compilation to stderr. |
+| `-jit-enable-eh` | Enable exception handling in the JIT. |
+| `-soft-float` | Use software floating-point library calls instead of hardware instructions. |
+
+## Compiling C to bitcode and running with lli
+
+<Steps>
+  <Step title="Write a C program">
+    ```c
+    // hello.c
+    #include <stdio.h>
+
+    int main(int argc, char **argv) {
+        printf("Hello from LLVM JIT!\n");
+        return 0;
+    }
+    ```
+  </Step>
+  <Step title="Compile to LLVM bitcode">
+    ```bash
+    clang -O0 -emit-llvm -c hello.c -o hello.bc
+    ```
+
+    Use `-emit-llvm -S` to produce text IR instead:
+
+    ```bash
+    clang -O0 -emit-llvm -S hello.c -o hello.ll
+    ```
+  </Step>
+  <Step title="Execute with lli">
+    ```bash
+    lli hello.bc
+    ```
+
+    Output:
+    ```text
+    Hello from LLVM JIT!
+    ```
+  </Step>
+</Steps>
+
+## Loading additional modules
+
+Use `--extra-module` to load additional bitcode modules. All modules are linked into the same execution context:
+
+```bash
+lli --extra-module=utils.bc main.bc
+```
+
+This is useful for programs split across multiple translation units. Compile each to bitcode separately, then combine them at runtime.
+
+## Optimization level
+
+The `-O` flag controls how aggressively the JIT optimizes IR before executing it. Higher levels may improve runtime performance at the cost of JIT compilation time:
+
+```bash
+# Run with maximum JIT optimization
+lli -O3 program.bc
+
+# Run without JIT optimization (fastest startup)
+lli -O0 program.bc
+```
+
+## Code model
+
+The `-code-model` flag selects the memory addressing model for JIT-compiled code:
+
+```bash
+lli -code-model=small program.bc
+```
+
+Available models: `default`, `tiny`, `small`, `kernel`, `medium`, `large`.
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="Testing passes" icon="flask">
+    Compile a test program to bitcode, run it through `opt`, then execute it with `lli` to verify correctness after optimization.
+  </Card>
+  <Card title="Prototyping" icon="code">
+    Quickly execute hand-written LLVM IR snippets without compiling a full binary. Useful when developing new IR transformations.
+  </Card>
+  <Card title="JIT experimentation" icon="bolt">
+    Explore JIT compilation behavior, measure JIT overhead, or test how different `-O` levels affect JIT output.
+  </Card>
+  <Card title="Interpreter debugging" icon="bug">
+    Use `-force-interpreter=true` to step through IR execution when the JIT produces incorrect results and you need to isolate the cause.
+  </Card>
+</CardGroup>
+
+## Example: verifying an optimization
+
+Compile, optimize, and verify that the optimized program still produces the same output:
+
+```bash
+# Compile to bitcode
+clang -O0 -emit-llvm -c program.c -o program.bc
+
+# Run unoptimized
+lli program.bc
+
+# Optimize
+opt -O2 program.bc -o program.opt.bc
+
+# Run optimized — should produce same output
+lli program.opt.bc
+```
+
+<Tip>
+Combine `lli` with `opt -verify-each` to catch IR that passes verify but executes incorrectly — these are often latent codegen bugs.
+</Tip>

@@ -1,0 +1,154 @@
+---
+title: "Code Generation"
+description: "The LLVM target-independent code generator: pipeline stages, instruction selection, register allocation, and key classes."
+keywords: ["code generation", "SelectionDAG", "instruction selection", "register allocation", "TargetMachine", "MachineInstr", "GlobalISel"]
+---
+
+The LLVM target-independent code generator is a framework that provides a suite of reusable components for translating the LLVM internal representation to machine code for a specified target — either in assembly form (suitable for a static compiler) or in binary machine code format (usable for a JIT compiler).
+
+The two most important interfaces a backend must implement are `TargetMachine` and `DataLayout`. All other components are reusable and optional, but required if you want to use the standard code generation algorithms.
+
+## Pipeline stages
+
+Code generation in LLVM is divided into the following ordered stages:
+
+<Steps>
+  <Step title="Instruction selection">
+    Determines an efficient way to express the input LLVM IR in the target instruction set. The stage produces initial code for the program in the target instruction set using virtual registers in SSA form, plus any physical register assignments required by target constraints or calling conventions. This step turns LLVM IR into a DAG of target instructions.
+  </Step>
+  <Step title="Scheduling and formation">
+    Takes the DAG of target instructions produced by instruction selection, determines an ordering of the instructions, then emits them as `MachineInstr` instances with that ordering.
+  </Step>
+  <Step title="SSA-based machine code optimizations">
+    An optional series of machine-code optimizations that operate on the SSA form produced by the instruction selector. Modulo-scheduling and peephole optimization work at this stage.
+  </Step>
+  <Step title="Register allocation">
+    Transforms the target code from an infinite virtual register file in SSA form to the concrete register file used by the target. Introduces spill code and eliminates all virtual register references from the program.
+  </Step>
+  <Step title="Prolog/epilog code insertion">
+    Once the amount of stack space required is known (for `alloca` instructions and spill slots), the prolog and epilog code for the function is inserted and abstract stack location references are eliminated. Also performs frame-pointer elimination and stack packing.
+  </Step>
+  <Step title="Late machine code optimizations">
+    Optimizations that operate on near-final machine code: spill code scheduling and peephole optimizations.
+  </Step>
+  <Step title="Code emission">
+    Outputs the code for the current function, either in the target assembler format or as binary machine code.
+  </Step>
+</Steps>
+
+Target implementations can also insert arbitrary target-specific passes into the flow at any point. For example, the X86 target uses a special pass to handle the 80x87 floating-point stack architecture.
+
+## Instruction selection approaches
+
+LLVM provides three instruction selection frameworks:
+
+<Tabs>
+  <Tab title="SelectionDAG">
+    The primary instruction selection framework. LLVM IR is lowered into a `SelectionDAG` — a directed acyclic graph of `SDNode` instances where nodes represent operations and edges represent data flow dependencies.
+
+    The `TargetLowering` class describes how LLVM code should be lowered to `SelectionDAG` operations for a given target, including:
+    - Which operations are natively supported by the target
+    - Initial register classes for various value types
+    - The return type of `setcc` operations
+    - Whether it is profitable to turn division by a constant into a multiply sequence
+
+    Pattern matching then selects target instructions that cover the DAG nodes. After selection, the DAG is scheduled and linearized into a sequence of `MachineInstr` objects.
+  </Tab>
+  <Tab title="FastISel">
+    A fast-path instruction selector used at `-O0` to minimize compile time. It handles a subset of common operations directly, falling back to the SelectionDAG selector for anything it cannot handle quickly. The goal is reduced compilation latency, not code quality.
+  </Tab>
+  <Tab title="GlobalISel">
+    A modern instruction selection framework designed to replace SelectionDAG for most targets. GlobalISel works on a generic machine IR (`MachineInstr` with generic opcodes such as `G_ADD`, `G_LOAD`) and lowers it through a series of passes: IRTranslator, Legalizer, RegBankSelect, and InstructionSelect. GlobalISel enables better optimization opportunities than SelectionDAG and is already the default selector for AArch64.
+  </Tab>
+</Tabs>
+
+## Machine code representation classes
+
+After instruction selection, code is represented using three main classes defined in `include/llvm/CodeGen/`:
+
+<CardGroup cols={3}>
+  <Card title="MachineFunction" icon="box">
+    Corresponds to an LLVM `Function`. Contains the list of `MachineBasicBlock` objects and holds per-function state such as the stack frame, virtual register information, and machine-level attributes.
+  </Card>
+  <Card title="MachineBasicBlock" icon="layers">
+    Corresponds to an LLVM `BasicBlock`. Contains a list of `MachineInstr` objects. Used for control-flow representation at the machine level.
+  </Card>
+  <Card title="MachineInstr" icon="zap">
+    Represents a single machine instruction as an opcode and a list of operands. Operands can be register references, immediate constants, basic block references, and more. Supports both SSA form (with virtual registers) and non-SSA form (with physical registers after register allocation).
+  </Card>
+</CardGroup>
+
+By convention, the LLVM code generator orders instruction operands so that all register definitions come before register uses. For example, the SPARC add instruction `add %i1, %i2, %i3` (result in `%i3`) is stored as `%i3, %i1, %i2` — destination first:
+
+```llvm MachineInstr operand order
+%r3 = add %i1, %i2
+```
+
+Machine instructions are built using the `BuildMI` helper from `include/llvm/CodeGen/MachineInstrBuilder.h`:
+
+```cpp building MachineInstr objects with BuildMI
+const TargetInstrInfo &TII = ...
+MachineBasicBlock &MBB = ...
+DebugLoc DL;
+
+// Create 'DestReg = mov 42' and append it to MBB
+MachineInstr *MI = BuildMI(MBB, DL, TII.get(X86::MOV32ri), DestReg).addImm(42);
+
+// Insert before a specific iterator position
+MachineBasicBlock::iterator MBBI = ...
+BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), DestReg).addImm(42);
+
+// Create 'cmp Reg, 42' — no destination register
+MI = BuildMI(MBB, DL, TII.get(X86::CMP32ri8)).addReg(Reg).addImm(42);
+```
+
+## Target description classes
+
+Every backend implements a set of abstract target description classes from `include/llvm/Target/`:
+
+| Class | Purpose |
+|-------|---------|
+| `TargetMachine` | Entry point for all target-specific information; provides `get*Info()` accessors |
+| `DataLayout` | Memory layout, pointer sizes, alignment requirements, endianness — the only required class |
+| `TargetLowering` | How LLVM IR operations map to target operations; used by SelectionDAG |
+| `TargetRegisterInfo` | Register file description: physical registers, register classes, aliases |
+| `TargetInstrInfo` | Machine instruction descriptions: mnemonics, operand counts, implicit uses/defs |
+| `TargetFrameLowering` | Stack frame layout: growth direction, alignment, local area offset |
+| `TargetSubtarget` | Per-chip information: supported instructions, latencies, execution itineraries |
+
+The `TargetRegisterInfo` and `TargetInstrInfo` implementations are typically auto-generated from TableGen descriptions. See [TableGen](/concepts/tablegen) for details.
+
+## Register allocation
+
+The register allocator replaces virtual registers (which are unlimited in number) with physical registers from the target's register file. It must introduce spill code when there are more live virtual registers than physical registers.
+
+LLVM includes multiple register allocator implementations selectable at build time or via `llc -regalloc=`:
+
+<AccordionGroup>
+  <Accordion title="Greedy (default)">
+    The default register allocator. Uses a priority queue and live-range splitting to produce high-quality allocation. Suitable for `-O1` and above.
+  </Accordion>
+  <Accordion title="Basic">
+    A simpler allocator that assigns registers one live range at a time without splitting. Produces reasonable results with lower compile time than Greedy.
+  </Accordion>
+  <Accordion title="Fast">
+    Designed for `-O0`: allocates registers locally within each basic block. Minimizes compile time at the cost of code quality.
+  </Accordion>
+  <Accordion title="PBQP (Partitioned Boolean Quadratic Programming)">
+    Models register allocation as a PBQP optimization problem. Used for architectures with complex register constraints.
+  </Accordion>
+</AccordionGroup>
+
+## The MC layer
+
+Below the `MachineInstr` level, LLVM has the MC (Machine Code) layer, which represents code at the object-file level. At this level, concepts like "constant pool entries" and "jump tables" do not exist — only assembly-level constructs like labels, sections, and instructions.
+
+The MC layer is used for both the integrated assembler and for JIT code emission.
+
+## Supported targets
+
+LLVM's code generator design supports any register-based microprocessor architecture. The two interfaces a backend must implement (`TargetMachine` and `DataLayout`) are the only hard requirements; non-traditional targets (such as a hypothetical GCC RTL emitter or FPGA backends) can implement just those two and do everything else themselves.
+
+<Tip>
+  The full reference for the code generator internals is in the [LLVM Target-Independent Code Generator](https://llvm.org/docs/CodeGenerator.html) documentation.
+</Tip>

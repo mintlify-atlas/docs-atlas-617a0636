@@ -1,0 +1,162 @@
+---
+title: "How to contribute"
+description: "Learn how to contribute bug reports, documentation, and code patches to the LLVM project."
+---
+
+Thank you for your interest in contributing to LLVM. There are multiple ways to contribute, and the project appreciates all of them. If you have questions, use the [LLVM Discourse forums](https://discourse.llvm.org) or the [Discord server](https://discord.gg/xS7Z362) for interactive chat.
+
+## Ways to contribute
+
+<CardGroup cols={2}>
+  <Card title="Bug reports" icon="bug">
+    Report issues you encounter while using LLVM via the [GitHub issue tracker](https://github.com/llvm/llvm-project/issues).
+  </Card>
+  <Card title="Bug fixes" icon="wrench">
+    Issues labeled [good first issue](https://github.com/llvm/llvm-project/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) are a good way to get familiar with the codebase.
+  </Card>
+  <Card title="Documentation" icon="book">
+    Improve existing docs or write new ones to help other contributors understand LLVM's internals.
+  </Card>
+  <Card title="Code review" icon="magnifying-glass">
+    Review open pull requests on GitHub and provide feedback. Code review helps maintain quality and mentor new contributors.
+  </Card>
+</CardGroup>
+
+## Submitting a bug report
+
+When you run into a bug, file a report on the [GitHub issue tracker](https://github.com/llvm/llvm-project/issues). A useful bug report includes:
+
+- The LLVM version (or commit hash) where the bug appears
+- The host platform and compiler used to build LLVM
+- A minimal reproducer — the smallest input or command that triggers the bug
+- The actual output or crash, and what you expected instead
+- Any relevant build flags (e.g., `-DCMAKE_BUILD_TYPE=Debug`, `-DLLVM_ENABLE_ASSERTIONS=On`)
+
+<Note>
+Security-related bugs have a separate reporting process. See the [LLVM Security page](https://llvm.org/docs/Security.html) for details.
+</Note>
+
+## Bigger pieces of work
+
+If you want to work on a larger feature or project, check the [LLVM Open Projects page](https://llvm.org/OpenProjects.html#what). Before starting, post on the [Discourse forums](https://discourse.llvm.org) so the community knows the project is being worked on and can provide guidance.
+
+Some changes are significant enough to require an RFC (Request for Comment) before a code review is appropriate. This applies to changes that would modify the LLVM Language Reference, add Clang language extensions, or have significant impact on users or downstream codebases. Post an RFC topic on Discourse to reach consensus first.
+
+## How to write a patch
+
+Before submitting a patch, make sure it:
+
+- Includes a small unit test covering the change
+- Conforms to the [coding standards](/contributing/coding-standards)
+- Does not contain unrelated changes
+- Is an isolated, self-contained change (independent changes should be separate patches)
+- Has a single commit, rebased on top of the upstream `origin/main` branch, with no merge commits
+
+### Format your patch
+
+LLVM uses `clang-format` for C++ code formatting. Use `git-clang-format` to format only the lines changed in your patch:
+
+```bash
+git clang-format HEAD~1
+```
+
+After formatting, stage the changes:
+
+```bash
+# To create a new commit
+git commit -a
+
+# To amend the most recent commit
+git commit --amend -a
+```
+
+<Note>
+Formatting changes sometimes obscure the intent of a patch. If that happens, add formatting as a **separate commit** within the pull request so reviewers can review it independently.
+</Note>
+
+If `clang-format` or `git clang-format` is not installed, build clang from source — `clang-format` is built alongside clang, and the git integration is at `clang/tools/clang-format/git-clang-format`.
+
+## Full contribution workflow
+
+<Steps>
+  <Step title="Fork the repository">
+    Fork [llvm/llvm-project](https://github.com/llvm/llvm-project) on GitHub to your own account.
+  </Step>
+  <Step title="Create a branch">
+    Create a local branch for each self-contained change you want to submit:
+
+    ```bash
+    git checkout -b my-fix origin/main
+    ```
+  </Step>
+  <Step title="Build LLVM and reproduce the issue">
+    Build LLVM from source as described in the [Getting Started guide](https://llvm.org/docs/GettingStarted.html). Use a debug build or a build with assertions to reproduce failures:
+
+    ```bash
+    cmake -DCMAKE_BUILD_TYPE=Debug -DLLVM_ENABLE_ASSERTIONS=On ...
+    ```
+  </Step>
+  <Step title="Make your change">
+    Write your fix or feature along with a test. Ensure the change conforms to the [coding standards](/contributing/coding-standards).
+  </Step>
+  <Step title="Format the code">
+    Run `git clang-format` to format only the changed lines before committing.
+  </Step>
+  <Step title="Open a pull request">
+    Push your branch to your fork and open a pull request against `llvm/llvm-project`:
+
+    ```bash
+    gh pr create
+    ```
+
+    When prompted, select your fork and follow the instructions to add a title and description.
+  </Step>
+  <Step title="Select reviewers">
+    Add suitable reviewers to your PR. Look for a `Maintainers.md` or `Maintainers.rst` file in the relevant sub-directory (for example, `llvm/Maintainers.md`). If you cannot add reviewers due to GitHub permissions, `@mention` them in a comment.
+  </Step>
+  <Step title="Respond to feedback">
+    Address all reviewer comments. Push fix-up commits to your branch rather than force-pushing, so GitHub can track the context of previous review comments. After responding, click **Re-request review** to bring the PR back to the reviewers' attention.
+  </Step>
+  <Step title="Merge the PR">
+    Once approved, merge with the **Squash and merge** button. If you do not have merge access, ask your reviewers to merge on your behalf — you must request this explicitly.
+  </Step>
+</Steps>
+
+<Tip>
+Set up the optional pre-push hook to run sanity checks before pushing:
+
+```bash
+ln -sf ../../llvm/utils/git/pre-push.py .git/hooks/pre-push
+```
+</Tip>
+
+## Code review process
+
+LLVM uses GitHub Pull Requests for all pre-commit code reviews. The Phabricator instance at [reviews.llvm.org](https://reviews.llvm.org) is now read-only.
+
+Key expectations during review:
+
+- Acknowledge all reviewer comments. If you disagree with a suggestion, explain why.
+- Do not assume silent approval — a PR requires explicit approval before merging.
+- If you have received no comments for a week, you may post "Ping" in a comment to request attention. The courtesy ping rate is once per week.
+- Post-commit review is also possible. Authors are expected to respond promptly to post-commit feedback. Failure to do so may result in the patch being reverted.
+
+## Tips for first-time contributors
+
+<AccordionGroup>
+  <Accordion title="Start with a good first issue">
+    The [good first issue](https://github.com/llvm/llvm-project/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) label on the GitHub issue tracker marks bugs that are suitable for newcomers. Comment on the issue to let others know you are working on it.
+  </Accordion>
+  <Accordion title="Keep changes small and focused">
+    Small, isolated patches are much easier to review and get approved quickly. Submit independent changes as separate pull requests.
+  </Accordion>
+  <Accordion title="Include a test">
+    Including a test is one of the first things a reviewer will look for. A test demonstrates what the patch does and prevents future regressions.
+  </Accordion>
+  <Accordion title="Use a public email on GitHub">
+    The LLVM buildbot infrastructure uses email to contact contributors about build and test failures. Ensure that "Keep my email addresses private" is **disabled** in your [GitHub account settings](https://github.com/settings/emails).
+  </Accordion>
+  <Accordion title="Ask for help">
+    If you are stuck, ask on the [Discourse forums](https://discourse.llvm.org) or in the [Discord server](https://discord.gg/xS7Z362). LLVM contributors also hold regular [office hours](https://llvm.org/docs/GettingInvolved.html#office-hours) where experienced developers are available for guidance.
+  </Accordion>
+</AccordionGroup>

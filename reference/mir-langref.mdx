@@ -1,0 +1,329 @@
+---
+title: "Machine IR (MIR) Reference"
+description: "Format reference for Machine IR: the YAML-based serialization of LLVM's machine-level intermediate representation used in codegen testing."
+---
+
+Machine IR (MIR) is LLVM's machine-level intermediate representation. It sits between LLVM IR and final machine code in the compilation pipeline, and is used primarily for testing and debugging the code generation passes.
+
+<Warning>
+The MIR format is a work in progress. Some state — such as target-specific `MachineFunctionInfo`, certain `MCSymbol` operand types, and most of `MachineModuleInfo` — is not yet serializable.
+</Warning>
+
+## What MIR is
+
+During code generation, LLVM IR is progressively lowered through a sequence of machine-specific passes: instruction selection, register allocation, scheduling, frame lowering, and so on. MIR is the serialization format for the state of the IR at any point in this pipeline.
+
+MIR captures constructs that have no equivalent in LLVM IR:
+- Physical and virtual registers
+- Target-specific instructions (e.g., `MOV32rm`, `RETQ`, `LDPXpost`)
+- Machine basic blocks with explicit successor and live-in lists
+- Stack frame layout and call site information
+
+## MIR file format
+
+A MIR file is a YAML document stream. The first document may contain an embedded LLVM IR module as a block literal string. The remaining documents each describe one machine function.
+
+```yaml
+---
+# Optional embedded LLVM IR module (block literal string)
+define i32 @inc(ptr %x) {
+entry:
+  %0 = load i32, ptr %x
+  %1 = add i32 %0, 1
+  store i32 %1, ptr %x
+  ret i32 %1
+}
+---
+# Machine function for @inc
+name:            inc
+tracksRegLiveness: true
+liveins:
+  - { reg: '$rdi' }
+body: |
+  bb.0.entry:
+    liveins: $rdi
+
+    $eax = MOV32rm $rdi, 1, _, 0, _
+    $eax = INC32r killed $eax, implicit-def dead $eflags
+    MOV32mr killed $rdi, 1, _, 0, _, $eax
+    RETQ $eax
+...
+```
+
+The embedded IR module is required when the test depends on global variables, external function references, function attributes, metadata, or debug information — since MIR has no native representation for these.
+
+<Info>
+If the embedded IR module contains only dummy stub functions (e.g., `define @func() { ret void }`), you can omit it entirely. The MIR loader will create the stub IR functions automatically.
+</Info>
+
+## Using llc to produce MIR
+
+### Stop the pipeline at a specific pass
+
+The `-stop-after` flag halts compilation after a named pass and emits MIR:
+
+```bash
+llc -stop-after=machine-cp bug-trigger.ll -o test.mir
+```
+
+If the same pass runs multiple times, a run index selects which invocation to stop after:
+
+```bash
+llc -stop-after=dead-mi-elimination,1 bug-trigger.ll -o test.mir
+```
+
+Use `-stop-before` to stop before a pass executes:
+
+```bash
+llc -stop-before=postrapseudos bug-trigger.ll -o test.mir
+```
+
+Use `-simplify-mir` to strip verbose default-value attributes from the output:
+
+```bash
+llc -stop-after=machine-cp -simplify-mir bug-trigger.ll -o test.mir
+```
+
+### Run a single pass on a MIR file
+
+The `-run-pass` flag parses a MIR file, executes the named pass, and emits the result:
+
+```bash
+llc -o - test.mir -mtriple=x86_64-- -run-pass=postrapseudos | FileCheck test.mir
+```
+
+This is the standard pattern for MIR-based regression tests.
+
+## Writing MIR tests
+
+<Steps>
+  <Step title="Generate initial MIR">
+    Compile an LLVM IR file with `-stop-after` to capture the machine state at the point just before the pass you want to test:
+
+    ```bash
+    llc -stop-after=machine-cp bug-trigger.ll -o test.mir
+    ```
+  </Step>
+  <Step title="Simplify the MIR">
+    Run with `-simplify-mir` and manually remove sections the test does not depend on:
+
+    - Drop `frameInfo` if there is no special frame usage.
+    - Remove `liveins:` at the function level if testing a late pass.
+    - Replace per-block successors' branch weights with plain labels: `successors: %bb.1, %bb.2`.
+    - Drop memory operand alias metadata if alias analysis is not under test: replace `:: (load 8 from %ir.x, !alias.scope !9)` with `:: (load 8)`.
+    - Simplify block names: `bb.42.myblock` → `bb.42`.
+  </Step>
+  <Step title="Add a RUN line">
+    Add a `# RUN:` comment at the top of the MIR file:
+
+    ```bash
+    # RUN: llc -o - %s -mtriple=x86_64-- -run-pass=postrapseudos | FileCheck %s
+    ```
+
+    MIR tests are target-dependent. Place them in the target-specific test directory (e.g., `test/CodeGen/X86/`).
+  </Step>
+  <Step title="Add FileCheck patterns">
+    Add `# CHECK:` lines that match the expected output from the pass.
+  </Step>
+</Steps>
+
+## Machine function attributes
+
+A machine function document supports these top-level attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `name` | Required. Must match the name of the corresponding IR function. |
+| `tracksRegLiveness` | Whether the function tracks register liveness (needed for passes that use live-in lists). |
+| `liveins` | List of physical registers live on function entry. |
+| `frameInfo` | Stack frame layout information. Often removable when the test does not depend on it. |
+| `callSites` | Call site information: which basic block, offset, and forwarded argument registers. |
+| `body` | YAML block literal containing machine basic blocks and instructions. |
+| `legalized` | Whether the function has been legalized. |
+| `regBankSelected` | Whether register banks have been assigned. |
+| `selected` | Whether instruction selection has completed. |
+| `alignment` | Function alignment in bytes. |
+
+## Machine basic blocks
+
+A machine basic block is identified by a numeric ID, optionally followed by a name matching the corresponding IR block:
+
+```text
+bb.0:             ; unnamed block with ID 0
+bb.1.entry:       ; block with ID 1, name "entry"
+bb.2.then:        ; block with ID 2, name "then"
+```
+
+Blocks can carry optional attributes in parentheses:
+
+```text
+bb.0.entry (address-taken):
+bb.2.else (align 4):
+bb.3 (landing-pad, align 4):
+bb.4 (inlineasm-br-indirect-target):
+```
+
+### Successors
+
+Successor blocks must be listed before any instructions. Branch weights are optional:
+
+```text
+bb.0.entry:
+  successors: %bb.1.then, %bb.2.else          ; without weights
+  <instructions>
+
+bb.0.entry:
+  successors: %bb.1.then(32), %bb.2.else(16)  ; with branch weights
+  <instructions>
+```
+
+### Live-in registers
+
+Live-in registers must also be declared before instructions:
+
+```text
+bb.0.entry:
+  liveins: $edi, $esi
+  <instructions>
+```
+
+### Block references
+
+Blocks are referenced by their ID:
+
+```text
+%bb.0         ; preferred syntax
+%bb.1.then    ; with optional name suffix
+```
+
+## Registers
+
+<Tabs>
+  <Tab title="Physical registers">
+    Physical registers are prefixed with `$`:
+
+    ```text
+    $eax
+    $r15
+    $rdi
+    $eflags
+    ```
+  </Tab>
+  <Tab title="Virtual registers">
+    Virtual registers are prefixed with `%` and identified by a numeric ID:
+
+    ```text
+    %0
+    %1
+    %42
+    ```
+
+    Virtual registers may carry a register class or bank annotation:
+
+    ```text
+    %0:gr32       ; virtual register constrained to GR32 register class
+    %1:gpr64      ; virtual register in GPR64 class
+    ```
+  </Tab>
+  <Tab title="Null register">
+    The null (no-register) sentinel is written as `_` or `$noreg`. The underscore form is preferred:
+
+    ```text
+    $eax = MOV32rm $rdi, 1, _, 0, _   ; two null register operands
+    ```
+  </Tab>
+</Tabs>
+
+## Machine instructions
+
+Instructions are written with defined (output) registers before the opcode and use (input) registers after:
+
+```text
+; No output register — opcode comes first
+RETQ $eax
+
+; One output register
+$eax = MOV32ri -42
+
+; Multiple output registers — opcode comes after all outputs
+$sp, $fp, $lr = LDPXpost $sp, 2
+```
+
+Instruction names come from the target's `*InstrInfo.td` files and are case-sensitive (`TSTri` and `tSTRi` are different instructions).
+
+### Instruction flags
+
+`frame-setup` and `frame-destroy` flags mark instructions that establish or tear down the stack frame:
+
+```text
+$fp = frame-setup ADDXri $sp, 0, 0
+$x21, $x20 = frame-destroy LDPXi $sp
+```
+
+### Bundled instructions
+
+Instructions can be grouped into a bundle:
+
+```text
+BUNDLE implicit-def $r0, implicit-def $r1, implicit $r2 {
+  $r0 = SOME_OP $r2
+  $r1 = ANOTHER_OP internal $r0
+}
+```
+
+## Machine operands
+
+### Register flags
+
+Register operands can carry flags that convey liveness information:
+
+| Flag | Meaning |
+|------|---------|
+| `killed` | This is the last use of the register value. |
+| `dead` | The defined register value is never used. |
+| `undef` | The register value is undefined (like LLVM IR `undef`). |
+| `implicit` | The register is implicitly used but not listed as an explicit operand. |
+| `implicit-def` | The register is implicitly defined. |
+| `internal` | Used inside a bundle; not visible outside. |
+| `early-clobber` | The output is written before some inputs are read (for inline asm). |
+
+```text
+dead $eax = XOR32rr undef $eax, undef $eax, implicit-def dead $eflags, implicit-def $al
+```
+
+### Immediate operands
+
+Immediate operands are untyped 64-bit signed integers:
+
+```text
+$eax = MOV32ri -42
+$eax = MOV32ri 255
+```
+
+For integers larger than 64 bits, LLVM uses a `MO_CImmediate` operand backed by an `APInt`.
+
+### Memory operands
+
+Memory operands describe memory accesses for alias analysis:
+
+```text
+$eax = MOV32rm $rdi, 1, _, 0, _ :: (load (s32) from %ir.x)
+MOV32mr killed $rdi, 1, _, 0, _, $eax :: (store (s32) into %ir.x)
+```
+
+Drop the alias metadata when the test does not depend on alias analysis:
+
+```text
+$eax = MOV32rm $rdi, 1, _, 0, _ :: (load (s32))
+```
+
+## Known limitations
+
+The MIR format currently cannot serialize:
+
+- Target-specific state in `MachineFunctionInfo` subclasses.
+- Target-specific `MachineConstantPoolValue` subclasses (ARM and SystemZ backends).
+- Temporary or local `MCSymbol` machine operands.
+- Most state in `MachineModuleInfo` (only CFI instructions and variable debug info are serialized).
+
+Tests that depend on any of this state cannot currently use the MIR format.

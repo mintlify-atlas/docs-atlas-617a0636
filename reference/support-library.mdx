@@ -1,0 +1,299 @@
+---
+title: "Support library"
+description: "Low-level utilities in llvm/Support for file I/O, error handling, command-line parsing, debugging, and more."
+---
+
+The LLVM Support library (`lib/Support`, `include/llvm/Support`) provides portable, low-level utilities that the rest of LLVM uses to interact with the operating system. Its purpose is to centralize all platform-specific code so the rest of LLVM can stay portable without `#ifdef` clutter.
+
+The Support library is intentionally narrow in scope — it provides only what LLVM needs, not a general-purpose OS wrapper.
+
+## Error handling
+
+LLVM uses `llvm::Error` and `llvm::Expected<T>` (defined in `llvm/Support/Error.h`) for recoverable errors. These model errors as return values rather than exceptions.
+
+<Tabs>
+  <Tab title="llvm::Error">
+    `Error` represents a success or failure value. Success is free to construct; failure wraps a user-defined `ErrorInfo` subclass. An `Error` **must** be checked — the destructor aborts the program if an unchecked error is destroyed:
+
+    ```cpp
+    Error printFile(StringRef Path) {
+      if (auto Err = checkFormat(Path))
+        return Err;              // propagate
+      // ... do work ...
+      return Error::success();   // success
+    }
+
+    // Calling code:
+    if (auto Err = printFile("data.bin")) {
+      handleAllErrors(std::move(Err), [](const ErrorInfoBase &E) {
+        errs() << "Error: " << E.message() << "\n";
+      });
+    }
+    ```
+  </Tab>
+  <Tab title="llvm::Expected<T>">
+    `Expected<T>` holds either a `T` value or an `Error`. Use it when a fallible function needs to return a result. It converts to `bool` — `true` for success:
+
+    ```cpp
+    Expected<MemoryBufferRef> openFile(StringRef Path);
+
+    // Idiomatic usage:
+    auto BufOrErr = openFile("input.ll");
+    if (!BufOrErr)
+      return BufOrErr.takeError();   // extract and propagate the error
+    MemoryBufferRef Buf = *BufOrErr; // dereference on success
+    ```
+
+    You can also use `moveInto()` to avoid naming an extra variable:
+
+    ```cpp
+    std::unique_ptr<MemoryBuffer> MB;
+    if (auto Err = openBuffer(Path).moveInto(MB))
+      return Err;
+    // MB is now initialized
+    ```
+  </Tab>
+  <Tab title="ExitOnError">
+    For tool code where errors should print a message and exit, `ExitOnError` removes the need to propagate errors manually:
+
+    ```cpp
+    ExitOnError ExitOnErr;
+    ExitOnErr.setBanner("my-tool: ");
+
+    // Aborts with a message on error, returns T on success:
+    auto Buf = ExitOnErr(MemoryBuffer::getFile("input.ll"));
+    ```
+
+    Defined in `llvm/Support/Error.h`.
+  </Tab>
+  <Tab title="StringError">
+    For errors with no recovery strategy, `StringError` wraps a string message with an equivalent `std::error_code` for interoperability:
+
+    ```cpp
+    return make_error<StringError>("Bad format", errc::invalid_argument);
+
+    // Shorter form for simple cases:
+    return createStringError(errc::invalid_argument, "Bad format: %s", Path);
+
+    // When no error_code interop is needed:
+    return createStringError(inconvertibleErrorCode(), "Unexpected token");
+    ```
+  </Tab>
+</Tabs>
+
+## File system and memory buffers
+
+### MemoryBuffer
+
+`MemoryBuffer` (in `llvm/Support/MemoryBuffer.h`) provides read-only access to a file or string buffer. It memory-maps files when available, making it efficient for large inputs:
+
+```cpp
+auto MBOrErr = MemoryBuffer::getFile("input.ll");
+if (!MBOrErr) {
+  errs() << "Cannot open file: " << MBOrErr.getError().message() << "\n";
+  return 1;
+}
+std::unique_ptr<MemoryBuffer> MB = std::move(*MBOrErr);
+StringRef Content = MB->getBuffer();
+```
+
+For in-memory buffers (e.g. in tests):
+
+```cpp
+auto MB = MemoryBuffer::getMemBuffer("define void @f() { ret void }", "test.ll");
+```
+
+### llvm::sys::fs
+
+The `llvm/Support/FileSystem.h` header provides portable file and directory operations:
+
+```cpp
+// Check if a path exists:
+if (sys::fs::exists(Path)) { ... }
+
+// Create a directory:
+if (auto EC = sys::fs::create_directories(Dir))
+  errs() << EC.message() << "\n";
+
+// Get a temporary file:
+SmallString<128> TmpPath;
+sys::fs::createTemporaryFile("prefix", "ll", TmpPath);
+
+// Iterate a directory:
+std::error_code EC;
+for (sys::fs::directory_iterator I(Dir, EC), E; I != E && !EC; I.increment(EC))
+  errs() << I->path() << "\n";
+```
+
+## Path utilities
+
+`llvm/Support/Path.h` provides chainable, platform-aware path manipulation. All functions operate on `StringRef` and write results to a `SmallString`:
+
+```cpp
+SmallString<256> P("/usr/local/bin/clang");
+
+// Decompose:
+StringRef Dir      = sys::path::parent_path(P);     // "/usr/local/bin"
+StringRef Filename = sys::path::filename(P);         // "clang"
+StringRef Stem     = sys::path::stem(P);             // "clang"
+StringRef Ext      = sys::path::extension(P);        // ""
+
+// Append a component (handles platform separator):
+sys::path::append(P, "plugins", "my-pass.so");
+
+// Convert to native separators:
+sys::path::native(P);
+```
+
+## Raw output streams
+
+LLVM's output abstraction (`llvm/Support/raw_ostream.h`) avoids the overhead of `std::ostream` virtual dispatch for common paths.
+
+| Stream | Description |
+|--------|-------------|
+| `outs()` | Standard output (`stdout`). |
+| `errs()` | Standard error (`stderr`), unbuffered. |
+| `nulls()` | Discards all output — useful for benchmarking. |
+| `raw_fd_ostream` | Wraps an existing file descriptor or opens a named file. |
+| `raw_string_ostream` | Writes into a `std::string`. |
+
+```cpp
+// Write to a file:
+std::error_code EC;
+raw_fd_ostream Out("output.ll", EC);
+if (EC) { errs() << EC.message(); return 1; }
+M.print(Out, nullptr);
+
+// Capture output in a string:
+std::string Buf;
+raw_string_ostream SS(Buf);
+SS << "Module: " << M.getName();
+SS.flush();
+// Buf now contains the formatted string
+```
+
+`raw_ostream` supports the `<<` operator for most LLVM types, including `Value`, `Type`, `Instruction`, and `Module`.
+
+## Command-line parsing
+
+`llvm/Support/CommandLine.h` provides a declarative command-line option system. Options are global objects; `cl::ParseCommandLineOptions` populates them from `argv`:
+
+```cpp
+#include "llvm/Support/CommandLine.h"
+
+static cl::opt<std::string> InputFile(
+    cl::Positional, cl::desc("<input file>"), cl::Required);
+
+static cl::opt<bool> Verbose(
+    "v", cl::desc("Enable verbose output"));
+
+static cl::opt<unsigned> OptLevel(
+    "O", cl::desc("Optimization level"), cl::init(2));
+
+static cl::list<std::string> PassList(
+    "passes", cl::desc("Passes to run"), cl::CommaSeparated);
+
+int main(int argc, char **argv) {
+  cl::ParseCommandLineOptions(argc, argv, "My LLVM tool\n");
+
+  if (Verbose)
+    errs() << "Processing: " << InputFile << " at -O" << OptLevel << "\n";
+}
+```
+
+`cl::ParseCommandLineOptions` automatically handles `--help`, `--version`, and error reporting for unknown options or missing required arguments.
+
+## Debugging utilities
+
+### LLVM_DEBUG macro
+
+`LLVM_DEBUG` (in `llvm/Support/Debug.h`) gates debug output behind a debug flag. Output is compiled out in release builds:
+
+```cpp
+#include "llvm/Support/Debug.h"
+#define DEBUG_TYPE "my-pass"
+
+void MyPass::run(Function &F) {
+  LLVM_DEBUG(dbgs() << "Running on function: " << F.getName() << "\n");
+
+  for (BasicBlock &BB : F) {
+    LLVM_DEBUG({
+      dbgs() << "  Processing block: ";
+      BB.printAsOperand(dbgs(), false);
+      dbgs() << "\n";
+    });
+  }
+}
+```
+
+Enable at runtime:
+
+```bash
+opt -debug-only=my-pass -passes=my-pass input.ll
+# or enable all debug output:
+opt -debug -passes=my-pass input.ll
+```
+
+`dbgs()` returns a stream that goes to `stderr` and respects the debug flag. Use `errs()` for unconditional diagnostics and `outs()` for program output.
+
+## Timers and statistics
+
+<Tabs>
+  <Tab title="llvm::Statistic">
+    `Statistic` (in `llvm/ADT/Statistic.h`) is a counter that is printed by `opt -stats`. Define one per logical counter, with a pass name and description:
+
+    ```cpp
+    #include "llvm/ADT/Statistic.h"
+    #define DEBUG_TYPE "my-pass"
+
+    STATISTIC(NumFunctionsProcessed, "Number of functions processed");
+    STATISTIC(NumInstructionsRemoved, "Number of instructions removed");
+
+    void MyPass::run(Function &F) {
+      ++NumFunctionsProcessed;
+      // ...
+      ++NumInstructionsRemoved;
+    }
+    ```
+
+    ```bash
+    opt -S -passes=my-pass -stats input.ll
+    # Prints a table of all non-zero statistics after the run
+    ```
+  </Tab>
+  <Tab title="llvm::Timer">
+    `Timer` (in `llvm/Support/Timer.h`) measures wall-clock and CPU time for a named region:
+
+    ```cpp
+    #include "llvm/Support/Timer.h"
+
+    Timer T("my-analysis", "Time spent in my analysis");
+    T.startTimer();
+    runExpensiveAnalysis();
+    T.stopTimer();
+
+    // Or use RAII:
+    {
+      TimeRegion TR(T);
+      runExpensiveAnalysis();
+    }
+    ```
+
+    Use `-time-passes` with `opt` to automatically time each pass in the pipeline without instrumenting pass code manually.
+  </Tab>
+</Tabs>
+
+## Process utilities
+
+`llvm/Support/Process.h` provides portable process information:
+
+```cpp
+// Get an environment variable:
+std::optional<std::string> Val = sys::Process::GetEnv("MY_VAR");
+
+// Get the number of columns in the terminal (for formatting):
+unsigned Cols = sys::Process::StandardOutColumns();
+
+// Color output (automatically disabled when not writing to a terminal):
+WithColor::note() << "hint: use -O2 for better performance\n";
+```
